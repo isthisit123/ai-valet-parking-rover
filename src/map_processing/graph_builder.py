@@ -3,7 +3,8 @@ import cv2
 import numpy as np
 from skimage.morphology import skeletonize
 
-from .map_reader import get_road_mask, BASE_DIR
+from .map_config import JUNCTION_KERNEL_SIZE, parse_map_config
+from .map_reader import get_road_mask
 
 
 def create_skeleton(road_mask):
@@ -26,7 +27,7 @@ def remove_small_components(road_mask):
 
     # 도로가 검출되지 않았다면 오류 발생
     if num_labels <= 1:
-        raise ValueError("No road detected")
+        raise ValueError("지도에서 도로를 검출하지 못했습니다.")
 
     # 배경(0번)을 제외하고 가장 큰 영역 선택
     largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
@@ -61,7 +62,7 @@ def detect_nodes(skeleton):
     # 가까운 교차점 후보들을 하나의 그룹으로 병합
     junction_mask = cv2.dilate(
         junction_mask,
-        np.ones((31, 31), dtype=np.uint8),
+        np.ones(JUNCTION_KERNEL_SIZE, dtype=np.uint8),
         iterations=1
     )
 
@@ -86,7 +87,8 @@ def detect_nodes(skeleton):
 
 if __name__ == "__main__":
     # 빨간색 도로가 추출된 마스크 불러오기
-    road_mask = get_road_mask()
+    config = parse_map_config("도로 중심선과 노드 검출 결과를 미리 봅니다.")
+    road_mask = get_road_mask(config.image_path)
 
     # 범례 등 분리된 작은 영역 제거
     road_mask = remove_small_components(road_mask)
@@ -95,7 +97,7 @@ if __name__ == "__main__":
     skeleton = create_skeleton(road_mask)
 
     # Skeleton 이미지 저장 경로 설정
-    output_path = BASE_DIR / "data" / "graphs" / "road_skeleton.png"
+    output_path = config.skeleton_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 원본 Skeleton 저장

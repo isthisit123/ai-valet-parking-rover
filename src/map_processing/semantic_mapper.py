@@ -5,13 +5,20 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .map_reader import BASE_DIR
-
-
-IMAGE_PATH = BASE_DIR / "assets" / "maps" / "parking_map_v1.png"
-GRAPH_PATH = BASE_DIR / "data" / "graphs" / "parking_map_v1.json"
-LABEL_PATH = BASE_DIR / "assets" / "maps" / "parking_map_v1_labels.json"
-OUTPUT_PATH = BASE_DIR / "data" / "graphs" / "parking_map_v1_semantic.json"
+from .map_config import (
+    ACCESSIBLE_REGION,
+    BUILDING_REGION,
+    DEFAULT_MAP,
+    GATE_REGION,
+    NORMAL_REGION,
+    REGION_BORDER_MARGIN,
+    REGION_CLOSE_KERNEL_SIZE,
+    REGION_MAX_IMAGE_RATIO,
+    REGION_MIN_FILL_RATIO,
+    REGION_MIN_SIDE,
+    parse_map_config,
+)
+from .map_reader import load_map_image
 
 
 def extract_regions(mask, min_area, image_shape):
@@ -30,21 +37,24 @@ def extract_regions(mask, min_area, image_shape):
         if area < min_area:
             continue
 
-        if area > width * height * 0.08:
+        if area > width * height * REGION_MAX_IMAGE_RATIO:
             continue
 
         # 이미지 경계와 연결된 배경 영역 제외
-        if x <= 1 or y <= 1:
+        if x <= REGION_BORDER_MARGIN or y <= REGION_BORDER_MARGIN:
             continue
 
-        if x + w >= width - 1 or y + h >= height - 1:
+        if (
+            x + w >= width - REGION_BORDER_MARGIN
+            or y + h >= height - REGION_BORDER_MARGIN
+        ):
             continue
 
-        if w < 20 or h < 20:
+        if w < REGION_MIN_SIDE or h < REGION_MIN_SIDE:
             continue
 
         # 테두리나 배경의 가느다란 조각은 실제 사각형 영역에서 제외
-        if area / (w * h) < 0.6:
+        if area / (w * h) < REGION_MIN_FILL_RATIO:
             continue
 
         cx, cy = centroids[i]
@@ -62,53 +72,15 @@ def detect_regions(image):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-    # 일반 주차칸: 흰색
-    white_mask = cv2.inRange(
-        hsv,
-        np.array([0, 0, 245]),
-        np.array([179, 55, 255])
-    )
-
-    # 장애인 주차칸: 밝은 파란색 (어두운 청회색 건물 제외)
-    blue_mask = cv2.inRange(
-        hsv,
-        np.array([90, 70, 150]),
-        np.array([135, 255, 255])
-    )
-
-    # 건물: 어두운 회색 또는 검은색
-    building_mask = cv2.inRange(
-        hsv,
-        np.array([0, 0, 0]),
-        np.array([179, 150, 120])
-    )
-
-    # 입구와 출구: 밝은 회색
-    gate_mask = cv2.inRange(
-        hsv,
-        np.array([0, 0, 150]),
-        np.array([179, 85, 238])
-    )
-
-    # 작은 구멍이나 색상 잡음 보정
-    kernel = np.ones((3, 3), np.uint8)
-
-    masks = [white_mask, blue_mask, building_mask, gate_mask]
-    masks = [
-        cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        for mask in masks
-    ]
-
-    white_mask, blue_mask, building_mask, gate_mask = masks
-
-    # 색상별 연결 영역 추출
-    normal = extract_regions(white_mask, 1000, image.shape)
-    # 하단 범례의 작은 파란색 아이콘은 제외
-    accessible = extract_regions(blue_mask, 3000, image.shape)
-    buildings = extract_regions(building_mask, 1500, image.shape)
-    gates = extract_regions(gate_mask, 1500, image.shape)
-
-    return normal, accessible, buildings, gates
+    # 일반 주차칸, 장애인 주차칸, 건물, 출입구 순으로 색상과 영역 크기를 적용한다.
+    kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
+    region_settings = (NORMAL_REGION, ACCESSIBLE_REGION, BUILDING_REGION, GATE_REGION)
+    regions = []
+    for lower, upper, min_area in region_settings:
+        mask = cv2.inRange(hsv, lower, upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        regions.append(extract_regions(mask, min_area, image.shape))
+    return tuple(regions)
 
 
 def assign_labels(regions, label_specs):
@@ -118,8 +90,8 @@ def assign_labels(regions, label_specs):
 
     if len(regions) < len(label_specs):
         raise ValueError(
-            f"Not enough regions: detected={len(regions)}, "
-            f"expected={len(label_specs)}"
+            f"검출 영역이 라벨 힌트보다 적습니다. "
+            f"검출 {len(regions)}개, 힌트 {len(label_specs)}개."
         )
 
     for spec in label_specs:
@@ -229,8 +201,8 @@ def assign_regions_to_nodes(nodes, regions):
     # 연결을 시작하기 전에 검출 과다 여부를 확인
     if len(regions) > len(endpoints):
         raise ValueError(
-            f"Too many regions for endpoints: regions={len(regions)}, "
-            f"endpoints={len(endpoints)}. Check color masks and region filters."
+            f"연결할 시설이 도로 끝점보다 많습니다. 시설 {len(regions)}개, "
+            f"끝점 {len(endpoints)}개. 색상 마스크와 영역 검출 기준을 확인하세요."
         )
 
     candidates = []
@@ -275,40 +247,17 @@ def assign_regions_to_nodes(nodes, regions):
         used_nodes.add(node_id)
 
     if len(used_regions) != len(regions):
-        raise ValueError("Some regions could not be assigned to nodes")
+        raise ValueError("일부 주차칸 또는 출입구를 도로 끝점에 연결하지 못했습니다.")
 
 
-def create_semantic_map(
-    *,
-    image_path=IMAGE_PATH,
-    graph_path=GRAPH_PATH,
-    label_path=LABEL_PATH,
-    output_path=OUTPUT_PATH,
-):
-    # 원본 지도와 기존 그래프 불러오기
-    image = cv2.imread(str(image_path))
-
-    if image is None:
-        raise FileNotFoundError(image_path)
-
-    with open(graph_path, "r", encoding="utf-8") as f:
-        graph_data = json.load(f)
-
-    with open(label_path, "r", encoding="utf-8") as f:
-        label_data = json.load(f)
-
+def map_semantics(graph_data, label_data, detected_regions, *, expected_map_id=None):
     map_id = label_data.get("map_id")
     if not isinstance(map_id, str) or not map_id.strip():
         raise ValueError("지도 라벨에 비어 있지 않은 map_id가 필요합니다.")
+    if expected_map_id is not None and map_id != expected_map_id:
+        raise ValueError(f"선택한 지도 {expected_map_id!r}와 라벨의 map_id {map_id!r}가 다릅니다.")
 
-    # 주차칸, 건물, 출입구 영역 자동 검출
-    normal, accessible, buildings, gates = detect_regions(image)
-
-    print("Normal spaces detected:", len(normal))
-    print("Accessible spaces detected:", len(accessible))
-    print("Buildings detected:", len(buildings))
-    print("Gate regions detected:", len(gates))
-
+    normal, accessible, buildings, gates = detected_regions
     parking_regions = assign_parking_ids(
         normal, accessible, label_data.get("parking_spaces")
     )
@@ -327,17 +276,42 @@ def create_semantic_map(
         if region["id"] in facility_ids:
             raise ValueError(f"주차칸 ID {region['id']!r}가 건물 또는 출입구 ID와 중복됩니다.")
 
-    # 주차칸과 출입구를 그래프 끝점에 연결
-    assign_regions_to_nodes(
-        graph_data["nodes"],
-        parking_regions + named_gates
-    )
+    # 원본 그래프의 노드를 보존하고 복사본에 주차칸과 출입구를 연결한다.
+    nodes = [node.copy() for node in graph_data["nodes"]]
+    assign_regions_to_nodes(nodes, parking_regions + named_gates)
 
     # 건물은 도로 노드가 아니므로 별도 영역으로 저장
-    graph_data["regions"] = (
-        parking_regions + named_gates + named_buildings
+    return {
+        **graph_data,
+        "nodes": nodes,
+        "regions": parking_regions + named_gates + named_buildings,
+        "map_id": map_id,
+    }
+
+
+def create_semantic_map(
+    *,
+    image_path=DEFAULT_MAP.image_path,
+    graph_path=DEFAULT_MAP.graph_path,
+    label_path=DEFAULT_MAP.label_path,
+    output_path=DEFAULT_MAP.semantic_path,
+    expected_map_id=None,
+):
+    image = load_map_image(image_path)
+    with open(graph_path, "r", encoding="utf-8") as f:
+        graph_data = json.load(f)
+    with open(label_path, "r", encoding="utf-8") as f:
+        label_data = json.load(f)
+
+    detected = detect_regions(image)
+    normal, accessible, buildings, gates = detected
+    print("Normal spaces detected:", len(normal))
+    print("Accessible spaces detected:", len(accessible))
+    print("Buildings detected:", len(buildings))
+    print("Gate regions detected:", len(gates))
+    semantic_data = map_semantics(
+        graph_data, label_data, detected, expected_map_id=expected_map_id
     )
-    graph_data["map_id"] = map_id
 
     # 의미가 추가된 지도 저장
     output_path = Path(output_path)
@@ -345,21 +319,28 @@ def create_semantic_map(
 
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(
-            graph_data,
+            semantic_data,
             f,
             indent=2,
             ensure_ascii=False
         )
 
     # 노드의 의미 출력
-    for node in graph_data["nodes"]:
+    for node in semantic_data["nodes"]:
         if "role" in node:
             print(node["id"], "->", node["role"])
 
     print("Saved:", output_path)
 
-    return graph_data
+    return semantic_data
 
 
 if __name__ == "__main__":
-    create_semantic_map()
+    config = parse_map_config("도로 그래프에 주차칸과 시설 정보를 연결합니다.")
+    create_semantic_map(
+        image_path=config.image_path,
+        graph_path=config.graph_path,
+        label_path=config.label_path,
+        output_path=config.semantic_path,
+        expected_map_id=config.map_id,
+    )

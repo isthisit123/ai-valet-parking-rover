@@ -1,37 +1,30 @@
 
-from pathlib import Path
 import cv2
-import numpy as np
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-
-IMAGE_PATH = BASE_DIR / "assets" / "maps" / "parking_map_v1.png"
+from .map_config import DEFAULT_MAP, ROAD_HSV_RANGES, parse_map_config
 
 
-def get_road_mask():
-    image = cv2.imread(str(IMAGE_PATH))
+def load_map_image(image_path):
+    image = cv2.imread(str(image_path))
 
     if image is None:
-        raise FileNotFoundError(f"이미지를 찾을 수 없습니다: {IMAGE_PATH}")
+        raise FileNotFoundError(f"지도 이미지를 읽을 수 없습니다. {image_path}")
+    return image
 
+
+def detect_road_mask(image):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask1, mask2 = [cv2.inRange(hsv, lower, upper) for lower, upper in ROAD_HSV_RANGES]
+    return cv2.bitwise_or(mask1, mask2)
 
-    lower_red1 = np.array([0, 100, 70])
-    upper_red1 = np.array([10, 255, 255])
 
-    lower_red2 = np.array([170, 100, 70])
-    upper_red2 = np.array([179, 255, 255])
-
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-
-    road_mask = cv2.bitwise_or(mask1, mask2)
-
-    return road_mask
+def get_road_mask(image_path=DEFAULT_MAP.image_path):
+    return detect_road_mask(load_map_image(image_path))
 
 
 if __name__ == "__main__":
-    road_mask = get_road_mask()
+    config = parse_map_config("도로 마스크를 미리 봅니다.", uses_output_dir=False)
+    road_mask = get_road_mask(config.image_path)
 
     cv2.imshow("Road Mask", road_mask)
     cv2.waitKey(0)

@@ -3,17 +3,12 @@ import math
 
 import networkx as nx
 
-from .map_reader import BASE_DIR
+from .map_config import DEFAULT_MAP, parse_map_config
 
 
-MAP_PATH = (
-    BASE_DIR / "data" / "graphs" / "parking_map_v1_semantic.json"
-)
-
-
-def load_parking_map():
+def load_parking_map(map_path=DEFAULT_MAP.semantic_path):
     # 의미 정보가 포함된 지도 불러오기
-    with open(MAP_PATH, "r", encoding="utf-8") as f:
+    with open(map_path, "r", encoding="utf-8") as f:
         map_data = json.load(f)
 
     # NetworkX 그래프 생성
@@ -63,9 +58,12 @@ def distance_to_building(node, building):
     return math.hypot(dx, dy)
 
 
-def select_parking(preference):
-    map_data, graph = load_parking_map()
+def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path):
+    map_data, graph = load_parking_map(map_path)
+    return select_parking_from_map(map_data, graph, preference)
 
+
+def select_parking_from_map(map_data, graph, preference):
     # 입구 노드 확인
     entrance = get_node_by_role(map_data, "entrance")
     start_id = entrance["id"]
@@ -117,18 +115,8 @@ def select_parking(preference):
     best_score, best_parking = min(candidates)
 
     # 입구에서 선택된 주차칸까지 최단 경로 계산
-    route = nx.dijkstra_path(
-        graph,
-        start_id,
-        best_parking,
-        weight="weight"
-    )
-
-    route_distance = nx.dijkstra_path_length(
-        graph,
-        start_id,
-        best_parking,
-        weight="weight"
+    route_distance, route = nx.single_source_dijkstra(
+        graph, start_id, target=best_parking, weight="weight"
     )
 
     return {
@@ -142,6 +130,9 @@ def select_parking(preference):
 
 
 if __name__ == "__main__":
+    config = parse_map_config("조건별 주차칸과 최단 경로를 계산합니다.")
+    map_data, graph = load_parking_map(config.semantic_path)
+
     # 조건별 주차칸 선택 테스트
     preferences = [
         "exit",
@@ -151,7 +142,7 @@ if __name__ == "__main__":
     ]
 
     for preference in preferences:
-        result = select_parking(preference)
+        result = select_parking_from_map(map_data, graph, preference)
 
         print()
         print("Preference:", result["preference"])

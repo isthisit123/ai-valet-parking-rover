@@ -2,7 +2,7 @@
 
 > **Arduino UNO Q 기반 모형 주차장 자율 발렛파킹 프로젝트**  
 > **현재 단계:** 주차장 지도 인식 → 그래프/의미 지도 생성 → 조건별 주차칸 선택 및 다익스트라 경로 계산까지 구현·기본 검증 완료  
-> **다음 작업:** 기존 코드 리팩토링 → 최단 경로 시각화 및 waypoint 생성
+> **다음 작업:** 최단 경로 시각화 및 waypoint 생성
 
 ## 1. 프로젝트 소개
 
@@ -70,6 +70,7 @@ ai-valet-parking-rover/
 ├── src/
 │   └── map_processing/
 │       ├── map_reader.py              # 빨간 도로 마스크 추출
+│       ├── map_config.py              # 지도별 경로와 공통 검출 기준
 │       ├── graph_builder.py           # 세선화, 끝점·교차점 검출
 │       ├── graph_exporter.py          # 그래프 생성 및 JSON/미리보기 저장
 │       ├── semantic_mapper.py         # 시설 검출 및 의미 정보 연결
@@ -123,6 +124,16 @@ python -m src.map_processing.parking_selector
 
 현재 파이프라인은 상대 import를 사용하므로 `.py` 파일을 개별 경로로 직접 실행하기보다 **`python -m src.map_processing.<모듈명>`** 형식으로 실행합니다.
 
+인자를 생략하면 원본 지도(`parking_map_v1`)를 사용합니다. 두 번째 지도를 실행하려면 세 단계에 같은 지도 ID를 전달합니다.
+
+```powershell
+python -m src.map_processing.graph_exporter --map-id parking_map_v1_test
+python -m src.map_processing.semantic_mapper --map-id parking_map_v1_test
+python -m src.map_processing.parking_selector --map-id parking_map_v1_test
+```
+
+테스트 지도는 `data/graphs/parking_map_v1_test/`에 그래프 JSON, 의미 지도 JSON, 미리보기 이미지를 저장합니다. 별도 위치에 저장하려면 세 명령에 동일한 `--output-dir <기준 폴더>`를 추가합니다. 원본 지도는 지정한 폴더 바로 아래에, 테스트 지도는 그 아래의 `parking_map_v1_test/`에 저장됩니다.
+
 특정 조건만 코드에서 시험하려면:
 
 ```python
@@ -164,12 +175,11 @@ python -m src.map_processing.graph_builder
 
 현재 데이터 단위는 **`pixel`**입니다. 지도상의 `weight`도 도로 중심선을 따른 픽셀 거리이므로 **실제 cm/m 거리로 해석하면 안 됩니다.** 실물 제작 후 카메라 캘리브레이션·월드 좌표계 정의·Homography를 적용하고, 변환된 좌표에서 간선 길이를 다시 계산할 예정입니다.
 
-### 다른 지도 테스트 시 주의
+### 지도 설정과 검증
 
-- 현재는 `parking_map_v1.png` 경로가 고정되어 있습니다. **원본 이미지와 라벨 JSON을 함께 백업**한 후 테스트하고, 끝나면 둘 다 복구해야 합니다.
-- 지도의 배치·크기가 바뀌면 `parking_map_v1_labels.json`의 위치 힌트도 수정해야 합니다.
-- `graph_exporter`부터 차례로 실행하면 **동일한 이름의 생성 JSON/미리보기 파일을 덮어씁니다.** 필요한 결과는 사전에 별도 보관해 주세요.
-- 지도별 파일명·설정·출력 경로 분리는 다음 리팩토링의 우선 과제입니다.
+- 등록된 지도와 공통 검출 기준은 `src/map_processing/map_config.py`에서 관리합니다.
+- 지도의 배치나 크기가 바뀌면 해당 지도의 라벨 파일에서 위치 힌트를 수정하고 그래프 생성부터 다시 실행합니다. 같은 지도 ID와 출력 위치로 재실행하면 해당 지도의 결과가 갱신됩니다.
+- 두 지도에서 주차칸 ID, 경로, 좌표를 비교하려면 `python -m unittest discover -s tests -v`를 실행합니다.
 
 ## 7. 검증 결과
 
@@ -204,8 +214,8 @@ Route distance: 833.95
 | 순서 | 단계 | 상태 |
 | --- | --- | --- |
 | 1 | 두 종류 지도에서 도로·시설·최단 경로 기본 검증 | **완료** |
-| 2 | 원본 지도 복구 확인 및 기존 코드 리팩토링 | **다음 작업** |
-| 3 | 최단 경로를 지도 위에 시각화하고 전체 waypoint JSON 생성 | 예정 |
+| 2 | 원본 지도 복구 확인 및 지도 처리 파이프라인 리팩토링 | **완료** |
+| 3 | 최단 경로를 지도 위에 시각화하고 전체 waypoint JSON 생성 | **다음 작업** |
 | 4 | 실물 모형 제작 후 천장 카메라 캘리브레이션 | 예정 |
 | 5 | 월드 좌표계 정의 및 Homography 좌표 변환 | 예정 |
 | 6 | YOLO 점유 인식·ArUco 추적·로버 주행 제어 통합 | 협업/예정 |

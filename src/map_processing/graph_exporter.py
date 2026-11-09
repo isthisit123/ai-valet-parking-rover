@@ -6,7 +6,8 @@ import cv2
 import networkx as nx
 import numpy as np
 
-from .map_reader import BASE_DIR, get_road_mask
+from .map_config import DEFAULT_MAP, ENDPOINT_RADIUS, JUNCTION_RADIUS, parse_map_config
+from .map_reader import get_road_mask
 from .graph_builder import (
     remove_small_components,
     create_skeleton,
@@ -65,7 +66,7 @@ def build_graph(skeleton, endpoints, junctions):
         candidates = []
 
         for index, (kind, (node_x, node_y)) in enumerate(points):
-            radius = 5 if kind == "endpoint" else 20
+            radius = ENDPOINT_RADIUS if kind == "endpoint" else JUNCTION_RADIUS
 
             distance_sq = (
                 (x - node_x) ** 2 +
@@ -101,7 +102,7 @@ def build_graph(skeleton, endpoints, junctions):
 
         if len(touched) != 2:
             raise ValueError(
-                f"Road connection error: {sorted(touched)}"
+                f"도로 구간은 두 노드에 연결되어야 합니다. 연결 노드 {sorted(touched)}"
             )
 
         a, b = sorted(touched)
@@ -145,7 +146,17 @@ def build_graph(skeleton, endpoints, junctions):
     return graph
 
 
-def save_graph(graph, skeleton):
+def build_road_graph(image_path=DEFAULT_MAP.image_path):
+    road_mask = remove_small_components(get_road_mask(image_path))
+    skeleton = create_skeleton(road_mask)
+    endpoints, junctions = detect_nodes(skeleton)
+    graph = build_graph(skeleton, endpoints, junctions)
+    if not graph or not nx.is_connected(graph):
+        raise ValueError(f"도로 그래프가 연결되어 있지 않습니다. 지도 {image_path}")
+    return graph, skeleton
+
+
+def save_graph(graph, skeleton, *, config=DEFAULT_MAP):
     # 노드 데이터를 JSON 형식으로 변환
     nodes = [
         {
@@ -181,10 +192,8 @@ def save_graph(graph, skeleton):
         })
 
     # JSON 저장
-    output_dir = BASE_DIR / "data" / "graphs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    json_path = output_dir / "parking_map_v1.json"
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = config.graph_path
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
@@ -229,25 +238,16 @@ def save_graph(graph, skeleton):
         )
 
     # 그래프 시각화 이미지 저장
-    preview_path = output_dir / "graph_preview.png"
+    preview_path = config.preview_path
     cv2.imwrite(str(preview_path), preview)
 
     return json_path, preview_path
 
 
 if __name__ == "__main__":
-    # 기존 지도 분석 함수 재사용
-    road_mask = get_road_mask()
-    road_mask = remove_small_components(road_mask)
-
-    skeleton = create_skeleton(road_mask)
-    endpoints, junctions = detect_nodes(skeleton)
-
-    # 노드와 간선을 가진 그래프 생성
-    graph = build_graph(skeleton, endpoints, junctions)
-
-    # 결과 저장
-    json_path, preview_path = save_graph(graph, skeleton)
+    config = parse_map_config("지도에서 도로 그래프를 생성합니다.")
+    graph, skeleton = build_road_graph(config.image_path)
+    json_path, preview_path = save_graph(graph, skeleton, config=config)
 
     # 결과 확인
     print("Nodes:", graph.number_of_nodes())

@@ -143,6 +143,72 @@ def assign_labels(regions, label_specs):
     return result
 
 
+def assign_parking_ids(normal, accessible, label_specs):
+    regions_by_type = {"normal": normal, "accessible": accessible}
+    detected_count = len(normal) + len(accessible)
+    if not detected_count:
+        raise ValueError("지도에서 주차칸을 검출하지 못했습니다.")
+    if not isinstance(label_specs, list) or not label_specs:
+        raise ValueError("지도 라벨에 parking_spaces 위치 힌트가 필요합니다.")
+    if detected_count != len(label_specs):
+        raise ValueError(
+            "주차칸 검출 수와 위치 힌트 수가 다릅니다. "
+            f"검출 {detected_count}개, 힌트 {len(label_specs)}개."
+        )
+
+    parking_regions = []
+    used_ids = set()
+    used_regions = set()
+    for spec in label_specs:
+        if not isinstance(spec, dict):
+            raise ValueError("parking_spaces의 각 항목은 JSON 객체여야 합니다.")
+        space_id = spec.get("id")
+        space_type = spec.get("type")
+        hint = spec.get("hint")
+        if not isinstance(space_id, str) or not space_id.strip():
+            raise ValueError("주차칸 id는 비어 있지 않은 문자열이어야 합니다.")
+        if space_id in used_ids:
+            raise ValueError(f"중복 주차칸 ID {space_id!r}.")
+        if space_type not in ("normal", "accessible"):
+            raise ValueError(f"주차칸 {space_id!r}의 type이 잘못되었습니다.")
+        if (
+            not isinstance(hint, list)
+            or len(hint) != 2
+            or not all(type(value) in (int, float) for value in hint)
+        ):
+            raise ValueError(f"주차칸 {space_id!r}의 hint는 [x, y] 좌표여야 합니다.")
+
+        # 같은 유형의 검출 상자 안에 힌트가 있어야 ID를 붙인다.
+        # 후보가 없거나 여러 개면 가까운 다른 칸으로 대신 매핑하지 않는다.
+        hint_x, hint_y = hint
+        detected = regions_by_type[space_type]
+        matches = []
+        for index, region in enumerate(detected):
+            x, y, width, height = region["bbox"]
+            if x <= hint_x < x + width and y <= hint_y < y + height:
+                matches.append(index)
+        if len(matches) != 1:
+            raise ValueError(
+                f"주차칸 {space_id!r}({space_type})의 위치 힌트 {hint}에 "
+                f"해당하는 검출 영역이 {len(matches)}개입니다. 정확히 1개가 필요합니다."
+            )
+        region_index = matches[0]
+        region_key = (space_type, region_index)
+        if region_key in used_regions:
+            raise ValueError(f"주차칸 {space_id!r}의 위치 힌트가 이미 매핑된 영역을 가리킵니다.")
+
+        used_ids.add(space_id)
+        used_regions.add(region_key)
+        parking_regions.append({
+            **detected[region_index],
+            "id": space_id,
+            "role": f"parking_{space_type}",
+            "type": space_type,
+        })
+
+    return parking_regions
+
+
 def point_to_bbox_distance(px, py, bbox):
     # 한 점에서 사각형 영역까지의 최단 거리
     x, y, w, h = bbox
@@ -212,18 +278,28 @@ def assign_regions_to_nodes(nodes, regions):
         raise ValueError("Some regions could not be assigned to nodes")
 
 
-def create_semantic_map():
+def create_semantic_map(
+    *,
+    image_path=IMAGE_PATH,
+    graph_path=GRAPH_PATH,
+    label_path=LABEL_PATH,
+    output_path=OUTPUT_PATH,
+):
     # 원본 지도와 기존 그래프 불러오기
-    image = cv2.imread(str(IMAGE_PATH))
+    image = cv2.imread(str(image_path))
 
     if image is None:
-        raise FileNotFoundError(IMAGE_PATH)
+        raise FileNotFoundError(image_path)
 
-    with open(GRAPH_PATH, "r", encoding="utf-8") as f:
+    with open(graph_path, "r", encoding="utf-8") as f:
         graph_data = json.load(f)
 
-    with open(LABEL_PATH, "r", encoding="utf-8") as f:
+    with open(label_path, "r", encoding="utf-8") as f:
         label_data = json.load(f)
+
+    map_id = label_data.get("map_id")
+    if not isinstance(map_id, str) or not map_id.strip():
+        raise ValueError("지도 라벨에 비어 있지 않은 map_id가 필요합니다.")
 
     # 주차칸, 건물, 출입구 영역 자동 검출
     normal, accessible, buildings, gates = detect_regions(image)
@@ -232,6 +308,10 @@ def create_semantic_map():
     print("Accessible spaces detected:", len(accessible))
     print("Buildings detected:", len(buildings))
     print("Gate regions detected:", len(gates))
+
+    parking_regions = assign_parking_ids(
+        normal, accessible, label_data.get("parking_spaces")
+    )
 
     # 건물 A/B 및 입구/출구에 의미 부여
     named_buildings = assign_labels(
@@ -242,19 +322,10 @@ def create_semantic_map():
         gates, label_data["gates"]
     )
 
-    # 주차칸 영역에 고유 ID 및 종류 부여
-    parking_regions = []
-
-    for role, detected in [
-        ("parking_normal", normal),
-        ("parking_accessible", accessible)
-    ]:
-        for region in detected:
-            parking_regions.append({
-                **region,
-                "id": f"space_{len(parking_regions) + 1}",
-                "role": role
-            })
+    facility_ids = {region["id"] for region in named_gates + named_buildings}
+    for region in parking_regions:
+        if region["id"] in facility_ids:
+            raise ValueError(f"주차칸 ID {region['id']!r}가 건물 또는 출입구 ID와 중복됩니다.")
 
     # 주차칸과 출입구를 그래프 끝점에 연결
     assign_regions_to_nodes(
@@ -266,11 +337,13 @@ def create_semantic_map():
     graph_data["regions"] = (
         parking_regions + named_gates + named_buildings
     )
+    graph_data["map_id"] = map_id
 
     # 의미가 추가된 지도 저장
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+    with output_path.open("w", encoding="utf-8") as f:
         json.dump(
             graph_data,
             f,
@@ -283,7 +356,7 @@ def create_semantic_map():
         if "role" in node:
             print(node["id"], "->", node["role"])
 
-    print("Saved:", OUTPUT_PATH)
+    print("Saved:", output_path)
 
     return graph_data
 

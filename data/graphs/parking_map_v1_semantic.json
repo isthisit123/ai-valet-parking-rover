@@ -9028,6 +9028,7 @@
       "area": 24273,
       "id": "space_1",
       "role": "parking_normal",
+      "type": "normal",
       "node_id": "N0"
     },
     {
@@ -9044,6 +9045,7 @@
       "area": 24123,
       "id": "space_2",
       "role": "parking_normal",
+      "type": "normal",
       "node_id": "N2"
     },
     {
@@ -9060,6 +9062,7 @@
       "area": 17456,
       "id": "space_3",
       "role": "parking_normal",
+      "type": "normal",
       "node_id": "N7"
     },
     {
@@ -9076,6 +9079,7 @@
       "area": 17304,
       "id": "space_4",
       "role": "parking_normal",
+      "type": "normal",
       "node_id": "N5"
     },
     {
@@ -9092,6 +9096,7 @@
       "area": 24941,
       "id": "space_5",
       "role": "parking_accessible",
+      "type": "accessible",
       "node_id": "N1"
     },
     {
@@ -9108,6 +9113,7 @@
       "area": 18083,
       "id": "space_6",
       "role": "parking_accessible",
+      "type": "accessible",
       "node_id": "N6"
     },
     {
@@ -9172,5 +9178,6 @@
       "id": "building_b",
       "role": "building_b"
     }
-  ]
+  ],
+  "map_id": "parking_map_v1"
 }

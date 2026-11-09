@@ -1,4 +1,5 @@
 {
+  "map_id": "parking_map_v1_test",
   "buildings": [
     {
       "id": "building_a",
@@ -30,5 +31,13 @@
         824
       ]
     }
+  ],
+  "parking_spaces": [
+    {"id": "space_1", "type": "normal", "hint": [212, 319]},
+    {"id": "space_2", "type": "normal", "hint": [635, 319]},
+    {"id": "space_3", "type": "normal", "hint": [525, 1248]},
+    {"id": "space_4", "type": "normal", "hint": [925, 1248]},
+    {"id": "space_5", "type": "accessible", "hint": [430, 319]},
+    {"id": "space_6", "type": "accessible", "hint": [738, 1248]}
   ]
 }

@@ -1,0 +1,34 @@
+{
+  "buildings": [
+    {
+      "id": "building_a",
+      "hint": [
+        870,
+        330
+      ]
+    },
+    {
+      "id": "building_b",
+      "hint": [
+        231,
+        1138
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "id": "entrance",
+      "hint": [
+        971,
+        711
+      ]
+    },
+    {
+      "id": "exit",
+      "hint": [
+        112,
+        824
+      ]
+    }
+  ]
+}

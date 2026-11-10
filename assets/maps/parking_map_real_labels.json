@@ -1,0 +1,31 @@
+{
+  "map_id": "parking_map_real",
+  "buildings": [
+    {
+      "id": "building_a",
+      "hint": [590, 57]
+    },
+    {
+      "id": "building_b",
+      "hint": [1060, 630]
+    }
+  ],
+  "gates": [
+    {
+      "id": "entrance",
+      "hint": [805, 677]
+    },
+    {
+      "id": "exit",
+      "hint": [775, 34]
+    }
+  ],
+  "parking_spaces": [
+    {"id": "space_1", "type": "normal", "hint": [548, 522]},
+    {"id": "space_2", "type": "normal", "hint": [566, 329]},
+    {"id": "space_3", "type": "normal", "hint": [979, 132]},
+    {"id": "space_4", "type": "normal", "hint": [1001, 271]},
+    {"id": "space_5", "type": "accessible", "hint": [580, 188]},
+    {"id": "space_6", "type": "accessible", "hint": [1028, 432]}
+  ]
+}

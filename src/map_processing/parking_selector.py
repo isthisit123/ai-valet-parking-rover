@@ -3,10 +3,11 @@ import math
 
 import networkx as nx
 
-from .map_config import DEFAULT_MAP, parse_map_config
+from .map_config import DEFAULT_MAP, create_map_parser, get_map_config
 
 
 PARKING_PREFERENCES = ("exit", "entrance", "building_a", "building_b")
+PARKING_TYPES = ("normal", "accessible")
 
 
 def load_parking_map(map_path=DEFAULT_MAP.semantic_path):
@@ -61,25 +62,29 @@ def distance_to_building(node, building):
     return math.hypot(dx, dy)
 
 
-def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path):
+def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path, parking_type="normal"):
     map_data, graph = load_parking_map(map_path)
-    return select_parking_from_map(map_data, graph, preference)
+    return select_parking_from_map(map_data, graph, preference, parking_type=parking_type)
 
 
-def select_parking_from_map(map_data, graph, preference):
+def select_parking_from_map(map_data, graph, preference, *, parking_type="normal"):
     # 입구 노드 확인
     entrance = get_node_by_role(map_data, "entrance")
     start_id = entrance["id"]
 
-    # 현재는 일반 주차칸만 선택
-    # YOLO 연결 전이므로 모든 일반 주차칸이 비었다고 가정
+    if parking_type not in PARKING_TYPES:
+        raise ValueError(f"Unknown parking type: {parking_type}")
+
+    # 요청한 유형의 주차칸만 후보에 넣는다. 기본 유형은 일반 주차칸이다.
+    # 점유 정보 연동 전에는 해당 후보가 비어 있다고 가정한다.
+    parking_role = f"parking_{parking_type}"
     parking_nodes = [
         node for node in map_data["nodes"]
-        if node.get("role") == "parking_normal"
+        if node.get("role") == parking_role
     ]
 
     if not parking_nodes:
-        raise ValueError("No normal parking spaces found")
+        raise ValueError(f"No {parking_type} parking spaces found")
 
     candidates = []
 
@@ -133,11 +138,17 @@ def select_parking_from_map(map_data, graph, preference):
 
 
 if __name__ == "__main__":
-    config = parse_map_config("조건별 주차칸과 최단 경로를 계산합니다.")
+    parser = create_map_parser("조건별 주차칸과 최단 경로를 계산합니다.")
+    parser.add_argument(
+        "--parking-type", choices=PARKING_TYPES, default="normal",
+        help="선택할 주차칸 유형 (기본값 normal)",
+    )
+    args = parser.parse_args()
+    config = get_map_config(args.map_id, output_root=args.output_dir)
     map_data, graph = load_parking_map(config.semantic_path)
 
     for preference in PARKING_PREFERENCES:
-        result = select_parking_from_map(map_data, graph, preference)
+        result = select_parking_from_map(map_data, graph, preference, parking_type=args.parking_type)
 
         print()
         print("Preference:", result["preference"])

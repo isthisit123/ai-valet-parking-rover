@@ -10,6 +10,9 @@ from .map_config import (
     BUILDING_REGION,
     DEFAULT_MAP,
     GATE_REGION,
+    REAL_ACCESSIBLE_REGION,
+    REAL_DARK_OPEN_KERNEL_SIZE,
+    REAL_MAP_ID,
     REGION_BORDER_MARGIN,
     REGION_CLOSE_KERNEL_SIZE,
     REGION_MAX_IMAGE_RATIO,
@@ -21,7 +24,7 @@ from .map_config import (
 from .map_reader import load_map_image
 
 
-def extract_regions(mask, min_area, image_shape):
+def extract_regions(mask, min_area, image_shape, *, allow_border=False):
     # 같은 색상으로 연결된 영역을 각각 검출
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8
@@ -40,12 +43,11 @@ def extract_regions(mask, min_area, image_shape):
         if area > width * height * REGION_MAX_IMAGE_RATIO:
             continue
 
-        # 이미지 경계와 연결된 배경 영역 제외
-        if x <= REGION_BORDER_MARGIN or y <= REGION_BORDER_MARGIN:
-            continue
-
-        if (
-            x + w >= width - REGION_BORDER_MARGIN
+        # 실물 검은 시설 후보를 제외하고 이미지 경계에 닿은 영역은 거른다.
+        if not allow_border and (
+            x <= REGION_BORDER_MARGIN
+            or y <= REGION_BORDER_MARGIN
+            or x + w >= width - REGION_BORDER_MARGIN
             or y + h >= height - REGION_BORDER_MARGIN
         ):
             continue
@@ -72,15 +74,26 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-    # 일반 주차칸 색상은 지도 설정을 따르고 나머지 시설은 공통 기준을 적용한다.
     kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
-    normal_region = normal_region_for_map(map_id)
-    region_settings = (normal_region, ACCESSIBLE_REGION, BUILDING_REGION, GATE_REGION)
+    is_real_map = map_id == REAL_MAP_ID
+    accessible_region = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
+    region_settings = (
+        (normal_region_for_map(map_id), False),
+        (accessible_region, False),
+        (BUILDING_REGION, is_real_map),
+        (GATE_REGION, False),
+    )
     regions = []
-    for lower, upper, min_area in region_settings:
+    for (lower, upper, min_area), is_real_dark in region_settings:
         mask = cv2.inRange(hsv, lower, upper)
+        if is_real_dark:
+            # 얇게 이어진 그림자를 끊고, 경계에 닿은 시설도 힌트 매칭 후보로 남긴다.
+            opening_kernel = np.ones(REAL_DARK_OPEN_KERNEL_SIZE, np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, opening_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        regions.append(extract_regions(mask, min_area, image.shape))
+        regions.append(
+            extract_regions(mask, min_area, image.shape, allow_border=is_real_dark)
+        )
     return tuple(regions)
 
 
@@ -116,6 +129,50 @@ def assign_labels(regions, label_specs):
     return result
 
 
+def is_pixel_hint(hint):
+    return (
+        isinstance(hint, list)
+        and len(hint) == 2
+        and all(type(value) in (int, float) for value in hint)
+    )
+
+
+def matching_region_indices(regions, hint):
+    hint_x, hint_y = hint
+    matches = []
+    for index, region in enumerate(regions):
+        x, y, width, height = region["bbox"]
+        if x <= hint_x < x + width and y <= hint_y < y + height:
+            matches.append(index)
+    return matches
+
+
+def assign_dark_facilities(regions, label_specs):
+    # 실물 지도의 건물과 입출구는 검은색 후보를 공유한다.
+    named_regions = []
+    used_regions = set()
+    used_ids = set()
+    for spec in label_specs:
+        facility_id, hint = spec["id"], spec.get("hint")
+        if facility_id in used_ids:
+            raise ValueError(f"건물 또는 입출구 ID {facility_id!r}가 중복됩니다.")
+        if not is_pixel_hint(hint):
+            raise ValueError(f"시설 {facility_id!r}의 hint는 [x, y] 좌표여야 합니다.")
+        matches = matching_region_indices(regions, hint)
+        if len(matches) != 1:
+            raise ValueError(
+                f"시설 {facility_id!r}의 위치 힌트 {hint}에 해당하는 검은색 영역이 "
+                f"{len(matches)}개입니다. 정확히 1개가 필요합니다."
+            )
+        index = matches[0]
+        if index in used_regions:
+            raise ValueError(f"시설 {facility_id!r}의 힌트가 이미 매핑된 검은색 영역을 가리킵니다.")
+        used_ids.add(facility_id)
+        used_regions.add(index)
+        named_regions.append({**regions[index], "id": facility_id, "role": facility_id})
+    return named_regions
+
+
 def assign_parking_ids(normal, accessible, label_specs):
     regions_by_type = {"normal": normal, "accessible": accessible}
     detected_count = len(normal) + len(accessible)
@@ -144,22 +201,13 @@ def assign_parking_ids(normal, accessible, label_specs):
             raise ValueError(f"중복 주차칸 ID {space_id!r}.")
         if space_type not in ("normal", "accessible"):
             raise ValueError(f"주차칸 {space_id!r}의 type이 잘못되었습니다.")
-        if (
-            not isinstance(hint, list)
-            or len(hint) != 2
-            or not all(type(value) in (int, float) for value in hint)
-        ):
+        if not is_pixel_hint(hint):
             raise ValueError(f"주차칸 {space_id!r}의 hint는 [x, y] 좌표여야 합니다.")
 
         # 같은 유형의 검출 상자 안에 힌트가 있어야 ID를 붙인다.
         # 후보가 없거나 여러 개면 가까운 다른 칸으로 대신 매핑하지 않는다.
-        hint_x, hint_y = hint
         detected = regions_by_type[space_type]
-        matches = []
-        for index, region in enumerate(detected):
-            x, y, width, height = region["bbox"]
-            if x <= hint_x < x + width and y <= hint_y < y + height:
-                matches.append(index)
+        matches = matching_region_indices(detected, hint)
         if len(matches) != 1:
             raise ValueError(
                 f"주차칸 {space_id!r}({space_type})의 위치 힌트 {hint}에 "
@@ -264,13 +312,14 @@ def map_semantics(graph_data, label_data, detected_regions, *, expected_map_id=N
     )
 
     # 건물 A/B 및 입구/출구에 의미 부여
-    named_buildings = assign_labels(
-        buildings, label_data["buildings"]
-    )
-
-    named_gates = assign_labels(
-        gates, label_data["gates"]
-    )
+    building_specs, gate_specs = label_data["buildings"], label_data["gates"]
+    if map_id == REAL_MAP_ID:
+        facilities = assign_dark_facilities(buildings, building_specs + gate_specs)
+        named_buildings = facilities[:len(building_specs)]
+        named_gates = facilities[len(building_specs):]
+    else:
+        named_buildings = assign_labels(buildings, building_specs)
+        named_gates = assign_labels(gates, gate_specs)
 
     facility_ids = {region["id"] for region in named_gates + named_buildings}
     for region in parking_regions:
@@ -304,15 +353,22 @@ def create_semantic_map(
     with open(label_path, "r", encoding="utf-8") as f:
         label_data = json.load(f)
 
-    detected = detect_regions(image, map_id=label_data.get("map_id"))
+    map_id = label_data.get("map_id")
+    detected = detect_regions(image, map_id=map_id)
     normal, accessible, buildings, gates = detected
     print("Normal spaces detected:", len(normal))
     print("Accessible spaces detected:", len(accessible))
-    print("Buildings detected:", len(buildings))
-    print("Gate regions detected:", len(gates))
+    if map_id == REAL_MAP_ID:
+        print("검은색 시설 후보:", len(buildings))
+    else:
+        print("Buildings detected:", len(buildings))
+        print("Gate regions detected:", len(gates))
     semantic_data = map_semantics(
         graph_data, label_data, detected, expected_map_id=expected_map_id
     )
+    if map_id == REAL_MAP_ID:
+        print("매칭된 건물:", len(label_data["buildings"]))
+        print("매칭된 입출구:", len(label_data["gates"]))
 
     # 의미가 추가된 지도 저장
     output_path = Path(output_path)

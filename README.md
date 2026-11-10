@@ -138,6 +138,8 @@ result = select_parking("building_a")
 print(result)
 ```
 
+장애인 주차칸만 대상으로 네 조건의 선택 결과를 확인하려면 `python -m src.map_processing.parking_selector --map-id parking_map_real --parking-type accessible`을 실행합니다. 파이썬에서는 `select_parking("entrance", parking_type="accessible")`로 요청할 수 있습니다. 기본 선택 유형은 일반 주차칸입니다.
+
 경로 한 개만 저장하려면 `python -m src.map_processing.path_visualizer --preference exit`를 실행합니다. 출력 이름은 `<map_id>_route_<preference>.png`와 `<map_id>_route_<preference>.json`입니다. 다른 지도를 처리할 때는 그래프 생성, 의미 지도 생성, 시각화 명령에 같은 `--map-id`와 `--output-dir`을 전달합니다.
 
 경로 JSON은 지도·주차칸 ID, 노드 순서, 그래프 이동 거리인 `total_distance`와 픽셀 `waypoints`를 담습니다. 좌표계는 `map_image`이며 좌상단 원점에서 x는 오른쪽, y는 아래로 증가합니다. 경로는 입구 도로 노드에서 선택 주차칸에 연결된 도로 노드까지 이어집니다. 두 좌표 사이 간격이 1픽셀보다 큰 축에서는 선분을 따라 점을 채우고, 각 점이 검출된 도로 안에 있는지 검사합니다.
@@ -164,11 +166,13 @@ python -m src.map_processing.graph_builder
 | 일반 주차칸 | 초록색 바탕, `P` 표기 |
 | 장애인 주차칸 | 밝은 파란색 바탕, `P` 표기 |
 | 건물 | 어두운 회색/검은색 사각형 |
-| 입구·출구 | 밝은 회색 사각형 |
+| 입구·출구 | 기본·테스트 지도는 밝은 회색, 실물 지도(`parking_map_real`)는 검은색 사각형 |
 
 기본 지도는 초록색 일반 주차칸을 사용합니다. 기존 테스트 지도(`--map-id parking_map_v1_test`)는 흰색 주차칸 설정으로 실행합니다. HSV와 최소 영역 면적은 `src/map_processing/map_config.py`에서 관리합니다.
 
 건물 A/B 및 입구/출구의 이름은 `assets/maps/parking_map_v1_labels.json`에서 `id`와 `hint`를 지정해 매칭합니다. `hint`는 **이미지 좌상단 원점의 `[x, y]` 픽셀 좌표**로, 정확한 건물 모서리 좌표가 아니라 시설을 구별하기 위한 위치 힌트입니다.
+
+실물 지도는 `parking_map_real.png`와 `parking_map_real_labels.json`을 사용합니다. 라벨의 `buildings`와 `gates`에 각 검은색 사각형 안쪽의 힌트 좌표를 하나씩 지정합니다. 검은색 사각형은 서로 떨어져 있어야 하며, 각 힌트는 서로 다른 검출 영역에 연결되어야 합니다. 실물 사진의 파란색 주차칸에는 별도 밝기 하한을 적용하고, 검은색 시설 후보는 얇게 이어진 픽셀을 제거한 뒤 이미지 경계에서도 검출합니다.
 
 현재 데이터 단위는 **`pixel`**입니다. 지도상의 `weight`도 도로 중심선을 따른 픽셀 거리이므로 **실제 cm/m 거리로 해석하면 안 됩니다.** 실물 제작 후 카메라 캘리브레이션·월드 좌표계 정의·Homography를 적용하고, 변환된 좌표에서 간선 길이를 다시 계산할 예정입니다.
 

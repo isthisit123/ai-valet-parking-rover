@@ -8,9 +8,11 @@ MAPS_DIR = BASE_DIR / "assets" / "maps"
 DEFAULT_OUTPUT_ROOT = BASE_DIR / "data" / "graphs"
 DEFAULT_MAP_ID = "parking_map_v1"
 TEST_MAP_ID = "parking_map_v1_test"
+REAL_MAP_ID = "parking_map_real"
 LABEL_FILENAMES = {
     DEFAULT_MAP_ID: "parking_map_v1_labels.json",
     TEST_MAP_ID: "parking_map_v1_labels_test.json",
+    REAL_MAP_ID: "parking_map_real_labels.json",
 }
 
 # HSV 범위는 하한과 상한 순서다. 시설 설정의 마지막 값은 최소 면적이다.
@@ -22,9 +24,12 @@ ROAD_HSV_RANGES = (
 NORMAL_REGION = ((45, 100, 100), (75, 255, 255), 1500)
 TEST_NORMAL_REGION = ((0, 0, 245), (179, 55, 255), 1000)
 ACCESSIBLE_REGION = ((90, 70, 150), (135, 255, 255), 3000)
+# 웹캠 사진의 파란색 주차칸은 디지털 지도보다 어둡게 찍힌다.
+REAL_ACCESSIBLE_REGION = ((90, 70, 90), (135, 255, 255), 3000)
 BUILDING_REGION = ((0, 0, 0), (179, 150, 120), 1500)
 GATE_REGION = ((0, 0, 150), (179, 85, 238), 1500)
 REGION_CLOSE_KERNEL_SIZE = (3, 3)
+REAL_DARK_OPEN_KERNEL_SIZE = (3, 3)
 REGION_MAX_IMAGE_RATIO = 0.08
 REGION_BORDER_MARGIN = 1
 REGION_MIN_SIDE = 20

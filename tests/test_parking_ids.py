@@ -6,7 +6,9 @@ from contextlib import redirect_stdout
 from math import dist
 from pathlib import Path
 
+import cv2
 import networkx as nx
+import numpy as np
 
 from src.map_processing import (
     graph_exporter,
@@ -14,7 +16,7 @@ from src.map_processing import (
     parking_selector,
     semantic_mapper,
 )
-from src.map_processing.map_config import get_map_config
+from src.map_processing.map_config import REAL_MAP_ID, get_map_config
 
 
 MAP_CASES = {
@@ -41,6 +43,80 @@ MAP_CASES = {
 
 
 class ParkingIdsTest(unittest.TestCase):
+    def test_accessible_parking_selection_for_all_preferences(self):
+        _, graph = parking_selector.load_parking_map()
+        expected = {
+            "exit": ("space_5", "N4 N10 N9 N8 N2", 1063.32),
+            "entrance": ("space_6", "N4 N10 N11 N7", 844.84),
+            "building_a": ("space_5", "N4 N10 N9 N8 N2", 1063.32),
+            "building_b": ("space_6", "N4 N10 N11 N7", 844.84),
+        }
+        for preference, (space_id, route, distance) in expected.items():
+            with self.subTest(preference=preference):
+                result = parking_selector.select_parking(preference, parking_type="accessible")
+                selected = graph.nodes[result["selected"]]
+                self.assertEqual(selected["role"], "parking_accessible")
+                self.assertEqual(selected["region_id"], space_id)
+                self.assertEqual(result["route"], route.split())
+                self.assertEqual(result["route_distance"], distance)
+
+                normal = parking_selector.select_parking(preference)
+                self.assertEqual(graph.nodes[normal["selected"]]["role"], "parking_normal")
+
+    def test_real_map_matches_dim_blue_and_edge_touching_dark_facilities(self):
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        for x, y in ((30, 30), (310, 30), (30, 190), (339, 190)):
+            cv2.rectangle(image, (x, y), (x + 60, y + 50), (0, 0, 0), -1)
+        cv2.line(image, (299, 215), (339, 215), (0, 0, 0), 1)
+        cv2.rectangle(image, (170, 190), (230, 240), (50, 200, 60), -1)
+        cv2.rectangle(image, (170, 85), (230, 135), (130, 68, 33), -1)
+        labels = {
+            "map_id": REAL_MAP_ID,
+            "buildings": [
+                {"id": "building_a", "hint": [60, 55]},
+                {"id": "building_b", "hint": [340, 55]},
+            ],
+            "gates": [
+                {"id": "entrance", "hint": [60, 215]},
+                {"id": "exit", "hint": [369, 215]},
+            ],
+            "parking_spaces": [
+                {"id": "space_1", "type": "normal", "hint": [200, 215]},
+                {"id": "space_2", "type": "accessible", "hint": [200, 110]},
+            ],
+        }
+        graph_data = {
+            "nodes": [
+                {"id": "start", "type": "endpoint", "x": 100, "y": 215},
+                {"id": "end", "type": "endpoint", "x": 329, "y": 215},
+                {"id": "parking", "type": "endpoint", "x": 200, "y": 180},
+                {"id": "accessible", "type": "endpoint", "x": 200, "y": 145},
+            ]
+        }
+        detected = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        self.assertEqual(tuple(map(len, detected)), (1, 1, 4, 0))
+
+        result = semantic_mapper.map_semantics(graph_data, labels, detected)
+        regions = {region["id"]: region for region in result["regions"]}
+        self.assertEqual(regions["entrance"]["node_id"], "start")
+        self.assertEqual(regions["exit"]["node_id"], "end")
+        self.assertEqual(regions["space_1"]["node_id"], "parking")
+        self.assertEqual(regions["space_2"]["node_id"], "accessible")
+        self.assertEqual(regions["exit"]["bbox"][0], 339)
+        for building in ("building_a", "building_b"):
+            self.assertNotIn("node_id", regions[building])
+        for spec in labels["buildings"] + labels["gates"]:
+            self.assertEqual(regions[spec["id"]]["center"], spec["hint"])
+
+        for invalid_hint, message in (([1, 1], "검은색 영역이 0개"), ([60, 55], "이미 매핑된")):
+            with self.subTest(hint=invalid_hint):
+                wrong_labels = {
+                    **labels,
+                    "gates": [{**labels["gates"][0], "hint": invalid_hint}, labels["gates"][1]],
+                }
+                with self.assertRaisesRegex(ValueError, message):
+                    semantic_mapper.map_semantics(graph_data, wrong_labels, detected)
+
     def test_both_maps_preserve_geometry_routes_and_ids(self):
         output_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         for map_id, case in MAP_CASES.items():

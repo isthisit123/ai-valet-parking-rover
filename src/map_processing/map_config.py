@@ -7,17 +7,20 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 MAPS_DIR = BASE_DIR / "assets" / "maps"
 DEFAULT_OUTPUT_ROOT = BASE_DIR / "data" / "graphs"
 DEFAULT_MAP_ID = "parking_map_v1"
+TEST_MAP_ID = "parking_map_v1_test"
 LABEL_FILENAMES = {
     DEFAULT_MAP_ID: "parking_map_v1_labels.json",
-    "parking_map_v1_test": "parking_map_v1_labels_test.json",
+    TEST_MAP_ID: "parking_map_v1_labels_test.json",
 }
 
-# 두 지도가 공유하는 검출 기준. HSV 범위는 하한과 상한 순서다.
+# HSV 범위는 하한과 상한 순서다. 시설 설정의 마지막 값은 최소 면적이다.
 ROAD_HSV_RANGES = (
     ((0, 100, 70), (10, 255, 255)),
     ((170, 100, 70), (179, 255, 255)),
 )
-NORMAL_REGION = ((0, 0, 245), (179, 55, 255), 1000)
+# 초록색 주차칸을 검출하고 같은 색의 작은 범례는 면적으로 제외한다.
+NORMAL_REGION = ((45, 100, 100), (75, 255, 255), 1500)
+TEST_NORMAL_REGION = ((0, 0, 245), (179, 55, 255), 1000)
 ACCESSIBLE_REGION = ((90, 70, 150), (135, 255, 255), 3000)
 BUILDING_REGION = ((0, 0, 0), (179, 150, 120), 1500)
 GATE_REGION = ((0, 0, 150), (179, 85, 238), 1500)
@@ -29,6 +32,11 @@ REGION_MIN_FILL_RATIO = 0.6
 JUNCTION_KERNEL_SIZE = (31, 31)
 ENDPOINT_RADIUS = 5
 JUNCTION_RADIUS = 20
+
+
+def normal_region_for_map(map_id):
+    # 기존 테스트 지도에만 흰색 주차칸 설정을 적용한다.
+    return TEST_NORMAL_REGION if map_id == TEST_MAP_ID else NORMAL_REGION
 
 
 @dataclass(frozen=True)

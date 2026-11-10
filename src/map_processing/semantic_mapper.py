@@ -10,12 +10,12 @@ from .map_config import (
     BUILDING_REGION,
     DEFAULT_MAP,
     GATE_REGION,
-    NORMAL_REGION,
     REGION_BORDER_MARGIN,
     REGION_CLOSE_KERNEL_SIZE,
     REGION_MAX_IMAGE_RATIO,
     REGION_MIN_FILL_RATIO,
     REGION_MIN_SIDE,
+    normal_region_for_map,
     parse_map_config,
 )
 from .map_reader import load_map_image
@@ -68,13 +68,14 @@ def extract_regions(mask, min_area, image_shape):
     return regions
 
 
-def detect_regions(image):
+def detect_regions(image, *, map_id=DEFAULT_MAP.map_id):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-    # 일반 주차칸, 장애인 주차칸, 건물, 출입구 순으로 색상과 영역 크기를 적용한다.
+    # 일반 주차칸 색상은 지도 설정을 따르고 나머지 시설은 공통 기준을 적용한다.
     kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
-    region_settings = (NORMAL_REGION, ACCESSIBLE_REGION, BUILDING_REGION, GATE_REGION)
+    normal_region = normal_region_for_map(map_id)
+    region_settings = (normal_region, ACCESSIBLE_REGION, BUILDING_REGION, GATE_REGION)
     regions = []
     for lower, upper, min_area in region_settings:
         mask = cv2.inRange(hsv, lower, upper)
@@ -303,7 +304,7 @@ def create_semantic_map(
     with open(label_path, "r", encoding="utf-8") as f:
         label_data = json.load(f)
 
-    detected = detect_regions(image)
+    detected = detect_regions(image, map_id=label_data.get("map_id"))
     normal, accessible, buildings, gates = detected
     print("Normal spaces detected:", len(normal))
     print("Accessible spaces detected:", len(accessible))

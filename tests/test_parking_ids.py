@@ -19,12 +19,13 @@ from src.map_processing.map_config import get_map_config
 
 MAP_CASES = {
     "parking_map_v1": {
-        "nodes": ("N0", "N2", "N7", "N5", "N1", "N6"),
+        # 초록색 지도에서 위치 힌트는 같은 칸을 가리키고 도로 노드 번호는 새 좌표를 따른다.
+        "nodes": ("N0", "N1", "N5", "N6", "N2", "N7"),
         "routes": {
-            "exit": (481.55, "N4 N10 N9 N8 N2", 864.0),
-            "entrance": (644.13, "N4 N10 N11 N5", 644.13),
-            "building_a": (312.0, "N4 N10 N9 N8 N2", 864.0),
-            "building_b": (110.0, "N4 N10 N11 N7", 791.66),
+            "exit": (480.20, "N4 N10 N9 N8 N1", 893.66),
+            "entrance": (686.62, "N4 N10 N11 N6", 686.62),
+            "building_a": (309.0, "N4 N10 N9 N8 N1", 893.66),
+            "building_b": (108.0, "N4 N10 N11 N5", 831.42),
         },
     },
     "parking_map_v1_test": {
@@ -67,7 +68,7 @@ class ParkingIdsTest(unittest.TestCase):
                 self.assertEqual(original["unit"], "pixel")
 
                 normal, accessible, buildings, gates = semantic_mapper.detect_regions(
-                    map_reader.load_map_image(config.image_path)
+                    map_reader.load_map_image(config.image_path), map_id=map_id
                 )
                 self.assertEqual(tuple(map(len, (normal, accessible, buildings, gates))), (4, 2, 2, 2))
                 spaces = {

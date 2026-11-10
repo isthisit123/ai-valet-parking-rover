@@ -6,6 +6,9 @@ import networkx as nx
 from .map_config import DEFAULT_MAP, parse_map_config
 
 
+PARKING_PREFERENCES = ("exit", "entrance", "building_a", "building_b")
+
+
 def load_parking_map(map_path=DEFAULT_MAP.semantic_path):
     # 의미 정보가 포함된 지도 불러오기
     with open(map_path, "r", encoding="utf-8") as f:
@@ -133,15 +136,7 @@ if __name__ == "__main__":
     config = parse_map_config("조건별 주차칸과 최단 경로를 계산합니다.")
     map_data, graph = load_parking_map(config.semantic_path)
 
-    # 조건별 주차칸 선택 테스트
-    preferences = [
-        "exit",
-        "entrance",
-        "building_a",
-        "building_b"
-    ]
-
-    for preference in preferences:
+    for preference in PARKING_PREFERENCES:
         result = select_parking_from_map(map_data, graph, preference)
 
         print()

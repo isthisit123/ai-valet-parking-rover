@@ -82,7 +82,7 @@ def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
 DEFAULT_MAP = get_map_config()
 
 
-def parse_map_config(description, *, uses_output_dir=True):
+def create_map_parser(description, *, uses_output_dir=True):
     parser = ArgumentParser(description=description)
     parser.add_argument(
         "--map-id", choices=LABEL_FILENAMES, default=DEFAULT_MAP_ID,
@@ -93,7 +93,11 @@ def parse_map_config(description, *, uses_output_dir=True):
             "--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT,
             help="지도 결과를 읽고 쓰는 기준 폴더 (기본값 data/graphs)",
         )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_map_config(description, *, uses_output_dir=True):
+    args = create_map_parser(description, uses_output_dir=uses_output_dir).parse_args()
     return get_map_config(
         args.map_id, output_root=getattr(args, "output_dir", DEFAULT_OUTPUT_ROOT)
     )

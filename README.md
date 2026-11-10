@@ -1,8 +1,7 @@
 # Q-ROVER — AI Valet Parking Rover
 
 > **Arduino UNO Q 기반 모형 주차장 자율 발렛파킹 프로젝트**  
-> **현재 단계:** 주차장 지도 인식 → 그래프/의미 지도 생성 → 조건별 주차칸 선택 및 다익스트라 경로 계산까지 구현·기본 검증 완료  
-> **지도 담당 최근 우선 작업:** 주차칸 고유 ID/위치 매핑 → 코드 리팩토링 → 최단 경로 시각화 및 waypoint 생성 (실제 완료 상태는 로컬 코드 확인)
+> **현재 단계:** 지도 인식, 주차칸 선택, 다익스트라 경로 계산, 경로 PNG와 픽셀 waypoint JSON 생성까지 두 지도에서 검증
 
 ## 1. 프로젝트 소개
 
@@ -19,7 +18,7 @@
     ↓                     ↖ 향후 YOLO 점유 결과(별도 팀원)
 조건에 맞는 주차칸 선택
     ↓ Dijkstra
-최단 경로 및 waypoint 생성·시각화 [시각화/waypoint는 예정]
+최단 경로 및 픽셀 waypoint 생성·시각화
     ↓ 향후 실제 좌표 변환
 천장 카메라 + ArUco 기반 위치 추정 → Q-ROVER 주행 제어 [예정]
 ```
@@ -49,8 +48,9 @@
 - **시설 이름 부여:** `parking_map_v1_labels.json`의 위치 힌트로 건물 A/B와 입구/출구를 식별합니다. OCR로 글자를 읽는 방식은 아닙니다.
 - **주차칸 선택:** `entrance`, `exit`, `building_a`, `building_b` 네 가지 선호 조건으로 일반 주차칸 중 목적지를 선택합니다.
 - **다익스트라:** 선택된 목적지까지 입구에서 이동할 그래프 노드 경로와 거리를 계산합니다.
+- **경로 시각화:** 지도 위에 출발점·교차점·목적지를 표시하고, 같은 경로를 픽셀 waypoint JSON으로 저장합니다.
 
-**2026-11-09 기준 미확인/미구현으로 기록된 항목:** 안정적인 주차칸 ID, 최단 경로 원본 지도 시각화, 전체 waypoint 연결·연속성 검증, 실제 cm 단위 좌표 변환, 실시간 주차 점유 반영, ArUco 위치 추정과 로버 주행 제어. 이후 Codex 작업으로 상태가 달라졌을 수 있으므로 로컬 구현과 테스트 결과를 우선 확인합니다.
+**후속 통합 항목**은 실제 cm 단위 좌표 변환, 실시간 주차 점유 반영, ArUco 위치 추정과 로버 주행 제어입니다.
 
 ## 4. 프로젝트 구조
 
@@ -74,7 +74,8 @@ ai-valet-parking-rover/
 │       ├── graph_builder.py           # 세선화, 끝점·교차점 검출
 │       ├── graph_exporter.py          # 그래프 생성 및 JSON/미리보기 저장
 │       ├── semantic_mapper.py         # 시설 검출 및 의미 정보 연결
-│       └── parking_selector.py        # 조건별 주차칸 선택 및 다익스트라
+│       ├── parking_selector.py        # 조건별 주차칸 선택 및 다익스트라
+│       └── path_visualizer.py         # 최단 경로 PNG와 픽셀 waypoint JSON 저장
 ├── data/
 │   └── graphs/
 │       ├── road_skeleton.png          # 세선화 확인 이미지
@@ -112,6 +113,9 @@ python -m src.map_processing.semantic_mapper
 
 # 3. 조건별 주차칸 선택 및 다익스트라 경로 계산
 python -m src.map_processing.parking_selector
+
+# 4. 네 조건의 경로 PNG와 waypoint JSON 저장
+python -m src.map_processing.path_visualizer
 ```
 
 각 단계의 입출력은 다음과 같습니다.
@@ -121,6 +125,7 @@ python -m src.map_processing.parking_selector
 | `graph_exporter` | `assets/maps/parking_map_v1.png` | `data/graphs/parking_map_v1.json`, `graph_preview.png` |
 | `semantic_mapper` | 지도 이미지, 그래프 JSON, `parking_map_v1_labels.json` | `data/graphs/parking_map_v1_semantic.json` |
 | `parking_selector` | 의미 지도 JSON | 선택 주차칸, 조건 점수, 노드 경로, 입구부터의 거리(터미널) |
+| `path_visualizer` | 지도 이미지, 의미 지도 JSON | `data/graphs/routes/`의 조건별 PNG와 waypoint JSON |
 
 현재 파이프라인은 상대 import를 사용하므로 `.py` 파일을 개별 경로로 직접 실행하기보다 **`python -m src.map_processing.<모듈명>`** 형식으로 실행합니다.
 
@@ -132,6 +137,10 @@ from src.map_processing.parking_selector import select_parking
 result = select_parking("building_a")
 print(result)
 ```
+
+경로 한 개만 저장하려면 `python -m src.map_processing.path_visualizer --preference exit`를 실행합니다. 출력 이름은 `<map_id>_route_<preference>.png`와 `<map_id>_route_<preference>.json`입니다. 다른 지도를 처리할 때는 그래프 생성, 의미 지도 생성, 시각화 명령에 같은 `--map-id`와 `--output-dir`을 전달합니다.
+
+경로 JSON은 지도·주차칸 ID, 노드 순서, 그래프 이동 거리인 `total_distance`와 픽셀 `waypoints`를 담습니다. 좌표계는 `map_image`이며 좌상단 원점에서 x는 오른쪽, y는 아래로 증가합니다. 경로는 입구 도로 노드에서 선택 주차칸에 연결된 도로 노드까지 이어집니다. 두 좌표 사이 간격이 1픽셀보다 큰 축에서는 선분을 따라 점을 채우고, 각 점이 검출된 도로 안에 있는지 검사합니다.
 
 중간 처리 이미지를 확인할 때:
 
@@ -163,12 +172,10 @@ python -m src.map_processing.graph_builder
 
 현재 데이터 단위는 **`pixel`**입니다. 지도상의 `weight`도 도로 중심선을 따른 픽셀 거리이므로 **실제 cm/m 거리로 해석하면 안 됩니다.** 실물 제작 후 카메라 캘리브레이션·월드 좌표계 정의·Homography를 적용하고, 변환된 좌표에서 간선 길이를 다시 계산할 예정입니다.
 
-### 다른 지도 테스트 시 주의
+### 다른 지도 테스트
 
-- 현재는 `parking_map_v1.png` 경로가 고정되어 있습니다. **원본 이미지와 라벨 JSON을 함께 백업**한 후 테스트하고, 끝나면 둘 다 복구해야 합니다.
-- 지도의 배치·크기가 바뀌면 `parking_map_v1_labels.json`의 위치 힌트도 수정해야 합니다.
-- `graph_exporter`부터 차례로 실행하면 **동일한 이름의 생성 JSON/미리보기 파일을 덮어씁니다.** 필요한 결과는 사전에 별도 보관해 주세요.
-- 지도별 파일명·설정·출력 경로 분리는 다음 리팩토링의 우선 과제입니다.
+- 테스트 지도는 `--map-id parking_map_v1_test`로 실행합니다. 결과는 `data/graphs/parking_map_v1_test/` 아래에 저장됩니다.
+- 지도의 배치·크기가 바뀌면 해당 라벨 JSON의 위치 힌트를 갱신한 뒤 그래프를 다시 생성합니다.
 
 ## 7. 검증 결과
 
@@ -194,7 +201,7 @@ Route: N3 -> N10 -> N11 -> N5
 Route distance: 833.95
 ```
 
-이는 두 지도에서 **기본 처리 파이프라인이 동작했다**는 검증이지, 임의의 곡선·고리형 도로·복잡한 교차점을 모두 처리한다는 보장은 아닙니다. 실제 도로 형상에 맞는 경로인지 확인할 **지도 위 경로 시각화 검증**도 남아 있습니다.
+두 지도에서 네 가지 조건의 경로 PNG와 JSON을 각각 생성하고, waypoint가 도로 영역 안에 있으며 인접 점 사이가 최대 대각선 1픽셀 간격인지 확인했습니다. 복잡한 곡선·고리형 도로·밀집 교차점은 추가 검증이 필요합니다.
 
 ## 8. 개발 로드맵
 
@@ -202,7 +209,7 @@ Route distance: 833.95
 
 | 작업 영역 | 다음 주요 목표 | 상태 |
 | --- | --- | --- |
-| 지도·경로 | 주차칸 고유 ID/위치 매핑 → 리팩토링 → 전체 waypoint 및 시각화 | 기본 지도 2종 검증 / 추가 작업 예정 |
+| 지도·경로 | 픽셀 경로에서 실측 좌표로 변환 | 경로 시각화와 픽셀 waypoint 기본 지도 2종 검증 |
 | YOLO 점유 인식 | 모델 학습·검증 → `parking_space_id`별 `free/occupied/unknown` 출력 | 팀원 담당 / 완료 여부 미확인 |
 | 로버 주행 | UNO Q 모터·ToF 제어 → waypoint 추종 및 안전 정지 | 팀원 담당 / 완료 여부 미확인 |
 | 실물·카메라 | 천장 카메라 보정 → ArUco → 공통 월드 좌표 | 협업 진행 예정 |
@@ -215,8 +222,8 @@ Route distance: 833.95
 
 - **검출 규칙 의존:** 기존 지도에서 과다 검출을 줄이기 위해 연결 영역의 색상 픽셀 비율(최소 60%), 파란색 HSV 밝기 하한(150), 파란 영역 최소 면적(3,000px) 등의 보정을 적용했습니다. 해상도/색상/지도 형태 변화에 대한 일반화는 추가 검증이 필요합니다.
 - **도로/교차점 처리:** `31×31` 교차점 병합, 노드 주변 반경 등 경험적인 설정을 사용합니다. 밀접 교차점, 루프, 짧은 가지, 연결이 끊긴 지도에서는 오류가 날 수 있습니다.
-- **경로 좌표 연속성:** 간선 `path`는 저장하지만 노드 주변 픽셀에서 도약이 발생할 수 있습니다. 실제 로버에 전달하기 전에 방향·연속성 검사 및 보정이 필요합니다.
-- **주차칸 고유 ID:** `N0`, `N1` 등의 그래프 노드 ID는 지도마다 달라질 수 있습니다. 별도 `P01` 등의 안정적인 주차칸 ID와 위치 매핑을 우선 구현·검증해야 합니다(최신 Codex 작업 상태 미확인).
+- **경로 좌표 연속성:** 픽셀 경로를 내보낼 때 노드 주변 간격을 직선으로 보간하고 도로 영역을 검사합니다. 실물 주행에는 월드 좌표 변환과 회전반경 검증이 필요합니다.
+- **주차칸 고유 ID:** 주차칸은 `(map_id, parking_space_id)`로 식별합니다. `N0`, `N1` 등의 그래프 노드 ID는 지도나 그래프를 다시 생성할 때 달라질 수 있습니다.
 - **점유 정보:** 모든 일반 주차칸이 비었다는 **테스트 가정**으로 선택합니다. YOLO 결과는 아직 반영하지 않았습니다. 장애인 주차칸은 일반 주차 조건에서 제외합니다.
 - **거리 의미 차이:** 출입구까지는 그래프 **도로 최단거리**, 건물까지는 건물 사각형 외곽의 **직선거리**를 사용합니다. 실제 출입문까지의 보행 거리는 아직 모델링하지 않았습니다.
 - **실물 좌표:** 월드 좌표와 로버 `(x, y, θ)` 추적/주행 제어는 아직 구현 전입니다.

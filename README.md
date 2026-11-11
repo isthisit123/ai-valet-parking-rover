@@ -182,7 +182,7 @@ python -m src.map_processing.graph_builder
 
 지도 준비는 저장소 루트에서 `python -m src.rover_control` 한 번으로 실행합니다. `assets/maps/`에 등록된 모든 `<map_id>.png`와 `<map_id>_labels.json` 쌍을 찾고, 도로 그래프와 의미 지도, 기본 경로 5개의 cm 지도 PNG와 JSON을 생성합니다. 지도별 기준점은 같은 폴더의 `<map_id>_points.json`을 읽습니다. 프로젝트 루트의 `floor_points.json`은 내부 `map_id`가 일치할 때 기본 입력으로 사용할 수 있습니다. 기준점 파일이 없는 지도는 이름과 필요한 경로를 출력하고 다음 지도를 처리합니다.
 
-결과는 실행마다 `data/rover_runs/run_.../<map_id>/` 아래에 저장합니다. 특정 지도는 `--points`, 특정 경로는 `--case`로 선택할 수 있습니다. 실측 기준점이 비어 있으면 전지 모서리로 추정 지도를 만듭니다. 실측값을 채우고 다시 실행하면 보정 오차를 검사하고, 통과한 경우 각 경로의 주행용 `*_cm.json`도 생성합니다.
+모든 cm 지도 PNG와 JSON은 `data/rover_runs/cm_preview/<map_id>/`에서 확인할 수 있습니다. 실행을 완료한 지도·경로의 파일만 갱신하며, 다른 지도나 경로의 파일은 유지합니다. 분석 중간 파일과 실행별 결과는 `data/rover_runs/run_.../<map_id>/`에 저장합니다. 특정 지도는 `--points`, 특정 경로는 `--case`로 선택할 수 있습니다. 실측 기준점이 비어 있으면 전지 모서리로 추정 지도를 만듭니다. 실측값을 채우고 다시 실행하면 보정 오차를 검사하고, 통과한 경우 각 경로의 주행용 `*_cm.json`도 생성합니다.
 
 로버가 TCP 서버를 열고 노트북의 위치 추정 프로그램이 로버 중심 좌표와 방향을 보내면, 노트북에서 아래 명령으로 주행을 시작합니다. YOLO 입력은 필요 없습니다.
 
@@ -191,27 +191,16 @@ python -m src.rover_control.drive --route data/maps/parking_map_real/routes/01_b
 ```
 
 - `--route`로 다섯 경로 중 사용할 JSON을 지정합니다. 픽셀 경로에는 **경로 생성에 쓴 동일 지도 이미지**에서 생성해 검증을 통과한 Homography JSON을 `--calibration`으로 전달합니다.
-- 기본 목적지는 경로 마지막 점입니다. `--goal-cm X Y`를 지정하면 입력 좌표에서 0.5 cm 이내인 경로 지점으로 목적지를 변경합니다. 주차칸 안에 정차하려면 칸 안까지 이어지는 진입 waypoint를 경로에 넣습니다.
+- 지도에서 생성한 cm 경로는 도로 끝에서 선택한 주차칸 중앙까지 직선 진입 구간을 포함합니다. 최종 waypoint는 주차칸 중앙입니다. `--goal-cm X Y`를 지정하면 입력 좌표에서 0.5 cm 이내인 경로 지점으로 목적지를 변경합니다.
 - 연결 없이 이동 거리와 회전점을 확인하려면 `python -m src.rover_control.route_preview --route data/maps/parking_map_real/routes/01_building_a.json --pixels`를 실행합니다. 실제 cm로 보려면 `--pixels` 대신 `--calibration map_calibration.json`을 지정합니다. 구간 거리는 원본 waypoint 사이의 거리를 합산하고, 회전각은 각 구간의 시작점과 끝점 방향을 비교합니다.
 - 같은 명령에 `--output data/maps/parking_map_real/routes/01_building_a_cm.json`을 추가하면 변환된 waypoint와 전체 거리를 cm 경로 파일로 저장합니다. 이후 `route_preview`와 `drive`는 이 파일을 `--route`로 직접 읽을 수 있습니다. 출력에는 새 파일 이름을 사용합니다.
 - 지도 이미지와 전체 지도 데이터를 함께 확인하려면 `python -m src.rover_control.map_preview --route data/maps/parking_map_real/routes/01_building_a.json --points floor_points.json --output-dir data/maps/parking_map_real/cm_preview`를 실행합니다. 네 모서리만 사용한 결과는 추정치이며, 실측 검증 후에는 `--points` 대신 `--calibration map_calibration.json`과 새 출력 폴더를 지정할 수 있습니다. PNG와 JSON에는 경로 도착점과 주차칸 중심이 각각 표시됩니다.
-- 독립 시험에는 아래처럼 직접 실측한 월드 cm 경로를 별도 JSON으로 저장해 `--route`로 선택할 수 있습니다. `--calibration`은 생략합니다. 실제 로버는 경로 출발점 3 cm 이내에 놓고 시작합니다.
+- 실제 로버는 경로 출발점 3 cm 이내에 놓고 시작합니다.
+
+위치 추정 프로그램은 같은 노트북의 `127.0.0.1:8766`에 아래 형식의 JSON을 UDP 데이터그램 하나로 0.1초마다 보냅니다. `captured_monotonic_s`는 해당 위치를 관측한 프레임을 받을 때 노트북에서 기록한 `time.monotonic()` 값입니다. 오른쪽이 0°이며 시계 방향이 양수입니다. 추적을 잃으면 `{"type":"lost","map_id":"parking_map_real"}`을 보냅니다.
 
 ```json
-{
-  "map_id": "rover_test",
-  "coordinate_frame": "world",
-  "unit": "cm",
-  "origin": "paper_top_left",
-  "axis_directions": {"x": "right", "y": "down"},
-  "waypoints": [[10, 10], [30, 10], [30, 25]]
-}
-```
-
-위치 추정 프로그램은 같은 노트북의 `127.0.0.1:8766`에 아래 JSON을 UDP 데이터그램 하나로 0.1초마다 보냅니다. `captured_monotonic_s`는 해당 위치를 관측한 프레임을 받을 때 노트북에서 기록한 `time.monotonic()` 값입니다. 오른쪽이 0°이며 시계 방향이 양수입니다. 추적을 잃으면 `{"type":"lost","map_id":"rover_test"}`를 보냅니다.
-
-```json
-{"type":"pose","map_id":"rover_test","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":10.0,"y_cm":10.0,"heading_deg":0.0,"captured_monotonic_s":12345.6}
+{"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}
 ```
 
 로버 TCP 서버 포트는 기본 `8765`입니다. 노트북은 0.1초마다 최대 한 줄의 주행 명령을 보내고, 로버는 명령을 적용한 뒤 0.08초 안에 같은 `seq`를 `applied_seq`로 돌려줍니다. 각 메시지는 줄바꿈으로 끝납니다.
@@ -225,7 +214,7 @@ python -m src.rover_control.drive --route data/maps/parking_map_real/routes/01_b
 
 노트북은 위치가 0.20초 이상 갱신되지 않거나 응답이 실패하면 정지 명령을 시도하고 실행을 종료합니다. 목표 2 cm 이내에서 정지 명령을 보내고, 적용 응답 후 새 위치 3개가 목표 반경 안에서 0.5 cm 이내로 유지되면 `arrived`와 오차를 출력합니다. `--max-speed-cm-s` 기본값은 8이며, 속도 명령의 양수 회전은 우회전입니다. 코드에는 4 cm 앞을 보는 추종 방식과 전진 속도를 0으로 낮추는 회전 명령이 들어 있어 실물에서 제자리 회전과 속도 변환을 확인해야 합니다.
 
-UNO Q에는 [Q-ROVER Receiver App Lab 앱](apps/q_rover_receiver/README.md)을 실행합니다. 기본 설정에서 모터 출력을 끈 채 `python -m src.rover_control.probe --rover-host <UNO_Q_IP>`로 명령이 MCU까지 도착하는지 확인할 수 있습니다. 스케치는 HYPER 실습의 DRV8833 배선(D5·D3 / D6·D9)을 사용합니다. 바퀴를 띄운 단발 시험 후, 경로 주행에 사용할 ToF 모델과 PWM 보정을 확인합니다.
+UNO Q에는 [Q-ROVER Receiver App Lab 앱](apps/q_rover_receiver/README.md)을 실행합니다. 스케치는 HYPER 실습의 DRV8833 배선(D5·D3 / D6·D9)을 사용합니다. 주행 전에 ToF 모델과 PWM 보정값을 확인합니다.
 
 ## 6. 지도 이미지 작성 규칙 및 좌표계
 

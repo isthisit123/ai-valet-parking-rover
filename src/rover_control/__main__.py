@@ -2,7 +2,8 @@ import argparse
 from hashlib import sha256
 import json
 from pathlib import Path
-from tempfile import mkdtemp
+from shutil import copyfile
+from tempfile import TemporaryDirectory, mkdtemp
 
 import cv2
 import numpy as np
@@ -15,7 +16,20 @@ from src.map_processing.semantic_mapper import create_semantic_map
 
 from .map_preview import build_map, export_cm_map, floor_transform, read_json
 from .route_preview import save_world_route
-from .tracking import load_route
+from .tracking import Route
+
+
+def publish_previews(source_dir, destination):
+    destination.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=destination) as folder:
+        staged = []
+        for source in sorted(source_dir.iterdir()):
+            temporary = Path(folder) / source.name
+            copyfile(source, temporary)
+            staged.append(temporary)
+        # 완성된 파일만 같은 지도·경로 이름으로 갱신한다.
+        for temporary in staged:
+            temporary.replace(destination / temporary.name)
 
 
 def prepare_map(map_id, points, run_dir, case, max_error_cm):
@@ -52,19 +66,21 @@ def prepare_map(map_id, points, run_dir, case, max_error_cm):
     matrix, size = floor_transform(
         map_id, image_bytes, image_size, points=points, calibration=calibration,
     )
+    preview_dir = config.output_dir / "cm_preview"
     for _, source_route in routes:
         name = source_route.stem
         if case is not None and name != case:
             continue
         data = build_map(semantic, read_json(source_route), matrix, size, verified=calibration is not None)
-        json_path, png_path = export_cm_map(image, matrix, data, name, config.output_dir / "cm_preview")
+        json_path, png_path = export_cm_map(image, matrix, data, name, preview_dir)
         print(f"{name}: {data['route']['total_distance_cm']:.2f} cm")
         print(f"  PNG: {png_path}")
         print(f"  JSON: {json_path}")
         if calibration is not None:
             route_path = source_route.with_name(f"{name}_cm.json")
-            save_world_route(source_route, route_path, load_route(source_route, calibration))
+            save_world_route(source_route, route_path, Route(map_id, data["route"]["waypoints_cm"]))
             print(f"  검증된 cm 경로: {route_path}")
+    return preview_dir
 
 
 def map_inputs(explicit_points):
@@ -99,18 +115,22 @@ def main():
         parser.error(str(error))
 
     completed = 0
+    preview_root = run_dir.parent / "cm_preview"
     for map_id, points in inputs:
         print(f"지도: {map_id}", flush=True)
         if not points.is_file():
             print(f"  기준점 파일 없음: {points}")
             continue
         try:
-            prepare_map(map_id, points, run_dir, args.case, args.max_error_cm)
+            preview_dir = prepare_map(map_id, points, run_dir, args.case, args.max_error_cm)
+            publish_previews(preview_dir, preview_root / map_id)
         except (OSError, ValueError, TypeError, KeyError, StopIteration, cv2.error) as error:
             print(f"  생성 실패: {error}")
             continue
         completed += 1
     print(f"지도 처리 완료: {completed}/{len(inputs)} | 결과 폴더: {run_dir}")
+    if completed:
+        print(f"공용 cm 지도 폴더: {preview_root}")
     return 0 if completed == len(inputs) else 1
 
 

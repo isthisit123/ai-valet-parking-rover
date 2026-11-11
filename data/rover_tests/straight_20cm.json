@@ -1,8 +1,0 @@
-{
-  "map_id": "rover_test",
-  "coordinate_frame": "world",
-  "unit": "cm",
-  "origin": "paper_top_left",
-  "axis_directions": {"x": "right", "y": "down"},
-  "waypoints": [[10, 10], [30, 10]]
-}

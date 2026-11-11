@@ -10,7 +10,7 @@ import numpy as np
 from src.map_processing.map_config import get_map_config
 from src.map_processing.planar_calibration import fit_floor_transform, load_world_to_image, project_points, quadrilateral
 from .route_preview import route_segments
-from .tracking import AXES, WORLD_ORIGIN, Route
+from .tracking import AXES, WORLD_ORIGIN, Route, parking_center_pixel
 
 
 def read_json(path):
@@ -70,7 +70,11 @@ def build_map(semantic, source_route, matrix, size, *, verified):
             "center_cm": center,
             "box_corners_cm": convert([(x, y), (x + w, y), (x + w, y + h), (x, y + h)]),
         })
-    route = Route(source_route["map_id"], list(map(tuple, convert(source_route["waypoints"]))))
+    road_points = source_route["waypoints"]
+    center_px = parking_center_pixel(source_route, semantic)
+    points = list(map(tuple, convert([*road_points, center_px])))
+    road_end, parking_center = points[-2:]
+    route = Route(source_route["map_id"], points)
     width, height = size
     if not all(0 <= x <= width and 0 <= y <= height for x, y in route.points):
         raise ValueError("변환한 경로가 전지 범위를 벗어났습니다.")
@@ -91,8 +95,10 @@ def build_map(semantic, source_route, matrix, size, *, verified):
             "node_route": source_route["node_route"],
             "destination_node_id": source_route["destination_node_id"],
             "start_cm": route.points[0],
+            "road_end_cm": road_end,
             "goal_cm": route.points[-1],
-            "parking_space_center_cm": selected["center_cm"],
+            "parking_space_center_cm": parking_center,
+            "parking_entry_distance_cm": dist(road_end, parking_center),
             "total_distance_cm": route.lengths[-1],
             "waypoints_cm": route.points,
             "segments": [
@@ -136,8 +142,8 @@ def draw_map(image, matrix, data, route_name):
     cv2.polylines(canvas, [line], False, (110, 40, 205), 4, cv2.LINE_AA)
     markers = [
         ("Start", route["start_cm"], (185, 100, 0)),
-        ("Goal " + route["destination_node_id"], route["goal_cm"], (75, 25, 180)),
-        ("Space center", route["parking_space_center_cm"], (45, 110, 25)),
+        ("Road end " + route["destination_node_id"], route["road_end_cm"], (75, 25, 180)),
+        ("Goal: space center", route["goal_cm"], (45, 110, 25)),
     ]
     for name, point, color in markers:
         x, y = pixel(point)

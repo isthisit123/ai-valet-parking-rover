@@ -8,15 +8,12 @@ PORT = 8765
 COMMAND_TIMEOUT_S = 0.30
 BRIDGE_TIMEOUT_S = 0.055
 MAX_LINE = 4096
-OUTPUT_MODES = {0: "dry_run", 1: "motor_enabled", 2: "bench"}
 STOP_REASONS = {
-    2: "motor_output_disabled",
     3: "command_timeout",
     4: "tof_obstacle",
     5: "tof_unavailable",
     6: "stop_latched",
     7: "invalid_command",
-    8: "output_mode_mismatch",
 }
 
 
@@ -57,33 +54,19 @@ def serve_client(connection, bridge_call):
             deadline = time.monotonic() + COMMAND_TIMEOUT_S
             kind = message.get("type")
             reply = {"type": "status", "applied_seq": seq}
-            log = None
-            if kind == "ping":
-                if stop_needed:
-                    raise ValueError("ping is only available while stopped")
-                mode = bridge_call("rover_mode", timeout=BRIDGE_TIMEOUT_S)
-                if mode not in OUTPUT_MODES:
-                    raise ValueError("unexpected rover_mode reply")
-                reply.update(state="ready", mode=OUTPUT_MODES[mode])
-            elif kind in ("drive", "bench"):
-                if kind == "drive":
-                    linear = speed_milli(message.get("linear_cm_s"), 0, 8)
-                    angular = speed_milli(message.get("angular_deg_s"), -45, 45)
-                    method, args = "rover_drive", (linear, angular)
-                    detail = f"drive v={linear / 1000:g} w={angular / 1000:g}"
-                else:
-                    method, args = "rover_bench", ()
-                    detail = "bench"
+            if kind == "drive":
+                linear = speed_milli(message.get("linear_cm_s"), 0, 8)
+                angular = speed_milli(message.get("angular_deg_s"), -45, 45)
                 stop_needed = True
-                result = bridge_call(method, *args, timeout=BRIDGE_TIMEOUT_S)
+                result = bridge_call("rover_drive", linear, angular, timeout=BRIDGE_TIMEOUT_S)
                 if result == 1:
                     reply.update(state="moving")
                 elif result in STOP_REASONS:
                     reply.update(state="stopped", stop_reason=STOP_REASONS[result])
                     stop_needed = False
                 else:
-                    raise ValueError(f"unexpected {method} reply")
-                log = f"RX seq={seq} {detail} MCU={result}"
+                    raise ValueError("unexpected rover_drive reply")
+                log = f"RX seq={seq} drive v={linear / 1000:g} w={angular / 1000:g} MCU={result}"
             elif kind == "stop":
                 if bridge_call("rover_stop", timeout=BRIDGE_TIMEOUT_S) != 0:
                     raise ValueError("MCU did not confirm stop")
@@ -94,9 +77,8 @@ def serve_client(connection, bridge_call):
                 raise ValueError("unknown command")
             connection.settimeout(BRIDGE_TIMEOUT_S)
             connection.sendall(json.dumps(reply).encode() + b"\n")
-            if log:
-                print(log, flush=True)
-            if kind == "stop" or reply.get("stop_reason") not in (None, "motor_output_disabled"):
+            print(log, flush=True)
+            if reply["state"] == "stopped":
                 return
     finally:
         if stop_needed:
@@ -112,17 +94,17 @@ def main():
     # Run 시 스케치가 RPC를 등록할 때까지 기다린 뒤 포트를 연다.
     for _ in range(30):
         try:
-            mode = Bridge.call("rover_mode", timeout=0.25)
+            stopped = Bridge.call("rover_stop", timeout=0.25)
             break
         except (OSError, ValueError, RuntimeError):
             time.sleep(0.25)
     else:
         raise RuntimeError("MCU Bridge unavailable. Check App launch and sketch build.")
-    if mode not in OUTPUT_MODES:
-        raise RuntimeError("unexpected rover_mode reply")
+    if stopped != 0:
+        raise RuntimeError("MCU did not confirm startup stop")
 
     with socket.create_server(("0.0.0.0", PORT)) as listener:
-        print(f"LISTEN TCP {PORT} mode={OUTPUT_MODES[mode]}", flush=True)
+        print(f"LISTEN TCP {PORT} | MCU stopped", flush=True)
         while True:
             connection, peer = listener.accept()
             with connection:

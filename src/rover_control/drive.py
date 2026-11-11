@@ -71,20 +71,19 @@ class PoseReceiver:
 
 
 class RoverLink:
-    def __init__(self, sock, *, ack_timeout_s=ACK_TIMEOUT_S):
+    def __init__(self, sock):
         self.sock = sock
-        self.ack_timeout_s = ack_timeout_s
         self.seq = 0
         self.buffer = bytearray()
 
     def send(self, kind, **fields):
         self.seq += 1
-        self.sock.settimeout(self.ack_timeout_s)
+        self.sock.settimeout(ACK_TIMEOUT_S)
         self.sock.sendall(encode({"type": kind, "seq": self.seq, **fields}))
         return self.seq
 
-    def exchange(self, kind, **fields):
-        deadline = time.monotonic() + self.ack_timeout_s
+    def command(self, kind, **fields):
+        deadline = time.monotonic() + ACK_TIMEOUT_S
         seq = self.send(kind, **fields)
         while b"\n" not in self.buffer:
             remaining = deadline - time.monotonic()
@@ -101,10 +100,6 @@ class RoverLink:
         status = json.loads(line)
         if not isinstance(status, dict) or status.get("type") != "status" or status.get("applied_seq") != seq:
             raise ValueError("로버 응답의 applied_seq가 보낸 명령과 다릅니다.")
-        return status
-
-    def command(self, kind, **fields):
-        status = self.exchange(kind, **fields)
         expected = "moving" if kind == "drive" else "stopped"
         if status.get("state") != expected:
             raise ValueError(f"로버가 {kind} 명령을 적용하지 못했습니다. {status.get('stop_reason', status.get('state'))}")
@@ -142,7 +137,7 @@ def confirm_arrival(receiver, goal):
 def run(follower, receiver, rover):
     stop_confirmed = False
     try:
-        pose = wait_for_first_pose(receiver)
+        pose = receiver.read()
         while True:
             cycle_started = time.monotonic()
             if pose is None:
@@ -175,7 +170,7 @@ def main():
     parser.add_argument("--pose-port", type=int, default=8766, help="로컬 위치 입력 UDP 포트")
     parser.add_argument(
         "--max-speed-cm-s", type=float, default=MAX_SPEED_CM_S,
-        help=f"1차 시험 전진 속도 상한 (최대 {MAX_SPEED_CM_S:g})",
+        help=f"전진 속도 상한 (최대 {MAX_SPEED_CM_S:g})",
     )
     args = parser.parse_args()
     try:
@@ -188,10 +183,14 @@ def main():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as pose_sock:
             pose_sock.bind(("127.0.0.1", args.pose_port))
             pose_sock.setblocking(False)
-            with rover_endpoint(args) as endpoint, socket.create_connection(endpoint, timeout=2) as rover_sock:
-                rover_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                print(f"route={args.route.name} goal_cm={route.points[-1]} pose_port={args.pose_port}", flush=True)
-                run(Follower(route, args.max_speed_cm_s), PoseReceiver(pose_sock, route.map_id), RoverLink(rover_sock))
+            receiver = PoseReceiver(pose_sock, route.map_id)
+            print(f"route={args.route.name} goal_cm={route.points[-1]} pose_port={args.pose_port}", flush=True)
+            with rover_endpoint(args) as endpoint:
+                # 위치를 기다리는 동안 로버의 명령 타임아웃을 소모하지 않는다.
+                wait_for_first_pose(receiver)
+                with socket.create_connection(endpoint, timeout=2) as rover_sock:
+                    rover_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    run(Follower(route, args.max_speed_cm_s), receiver, RoverLink(rover_sock))
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"stopped: {error} (로버 명령 타임아웃 {COMMAND_TIMEOUT_S:.2f}초 필요)", file=sys.stderr)
         return 1

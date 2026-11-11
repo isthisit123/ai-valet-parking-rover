@@ -239,7 +239,10 @@ def save_graph(graph, skeleton, *, config=DEFAULT_MAP):
 
     # 그래프 시각화 이미지 저장
     preview_path = config.preview_path
-    cv2.imwrite(str(preview_path), preview)
+    success, encoded = cv2.imencode(".png", preview)
+    if not success:
+        raise OSError(f"그래프 미리보기 PNG를 인코딩할 수 없습니다. {preview_path}")
+    preview_path.write_bytes(encoded.tobytes())
 
     return json_path, preview_path
 

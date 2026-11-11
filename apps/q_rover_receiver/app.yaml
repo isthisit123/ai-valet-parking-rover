@@ -1,0 +1,4 @@
+name: Q-ROVER Receiver
+description: 노트북의 속도 명령을 받아 UNO Q MCU로 전달합니다.
+ports:
+  - 8765

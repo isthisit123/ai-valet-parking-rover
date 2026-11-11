@@ -1,11 +1,13 @@
 
 import cv2
+import numpy as np
+from pathlib import Path
 
 from .map_config import DEFAULT_MAP, ROAD_HSV_RANGES, parse_map_config
 
 
 def load_map_image(image_path):
-    image = cv2.imread(str(image_path))
+    image = cv2.imdecode(np.frombuffer(Path(image_path).read_bytes(), np.uint8), cv2.IMREAD_COLOR)
 
     if image is None:
         raise FileNotFoundError(f"지도 이미지를 읽을 수 없습니다. {image_path}")

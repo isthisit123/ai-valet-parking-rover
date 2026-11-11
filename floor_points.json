@@ -1,0 +1,11 @@
+{
+  "map_id": "parking_map_real",
+  "paper_size_cm": [109, 79],
+  "paper_corners_px": [[249.2, 255.3], [974.1, 267.0], [1088.1, 654.5], [71.5, 620.8]],
+  "control_points": [
+    {"id": "A", "pixel": [305, 342], "world_cm": [null, null]},
+    {"id": "B", "pixel": [806, 350], "world_cm": [null, null]},
+    {"id": "C", "pixel": [972, 637], "world_cm": [null, null]},
+    {"id": "D", "pixel": [316, 622], "world_cm": [null, null]}
+  ]
+}

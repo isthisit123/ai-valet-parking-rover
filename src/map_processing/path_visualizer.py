@@ -6,6 +6,7 @@ import numpy as np
 from .graph_builder import remove_small_components
 from .map_config import create_map_parser, get_map_config
 from .map_reader import detect_road_mask, load_map_image
+from .occupancy import load_occupancy
 from .parking_selector import (
     PARKING_PREFERENCES,
     PARKING_TYPES,
@@ -67,18 +68,22 @@ def connect_waypoints(graph, node_route, road_mask):
     return waypoints
 
 
-def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_type="normal"):
+def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_type="normal",
+                     occupancy=None, max_age_seconds=5.0, now=None):
     if map_data["unit"] != "pixel":
         raise ValueError("지도 위 경로는 픽셀 단위의 도로 그래프가 필요합니다.")
 
-    result = select_parking_from_map(map_data, graph, preference, parking_type=parking_type)
+    result = select_parking_from_map(
+        map_data, graph, preference, parking_type=parking_type,
+        occupancy=occupancy, max_age_seconds=max_age_seconds, now=now,
+    )
     node_route = result["route"]
     destination = result["selected"]
     space_id = graph.nodes[destination].get("region_id")
     if not space_id:
         raise ValueError(f"목적지 노드 {destination}의 주차칸 ID가 없습니다.")
 
-    return {
+    route_data = {
         "map_id": map_id,
         "preference": preference,
         "parking_type": parking_type,
@@ -93,6 +98,12 @@ def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_
         "total_distance": result["route_distance"],
         "waypoints": [list(point) for point in connect_waypoints(graph, node_route, road_mask)],
     }
+    if occupancy is not None:
+        route_data.update(
+            occupancy_status=result["occupancy_status"],
+            occupancy_observed_at=result["occupancy_observed_at"],
+        )
+    return route_data
 
 
 def draw_marker(image, point, label, color, route_points):
@@ -159,7 +170,8 @@ def draw_route(image, graph, route_data):
     return preview
 
 
-def export_routes(config, preferences=None, *, parking_type="normal"):
+def export_routes(config, preferences=None, *, parking_type="normal",
+                  occupancy=None, max_age_seconds=5.0):
     map_data, graph = load_parking_map(config.semantic_path)
     if map_data.get("map_id", config.map_id) != config.map_id:
         raise ValueError(f"선택한 지도와 의미 지도 JSON의 map_id가 다릅니다. {config.map_id}")
@@ -175,7 +187,8 @@ def export_routes(config, preferences=None, *, parking_type="normal"):
         )
     for case_id, preference, case_parking_type in cases:
         route_data = build_route_data(
-            config.map_id, map_data, graph, preference, road_mask, parking_type=case_parking_type
+            config.map_id, map_data, graph, preference, road_mask, parking_type=case_parking_type,
+            occupancy=occupancy, max_age_seconds=max_age_seconds,
         )
         route_data["case_id"] = case_id
         preview = draw_route(image, graph, route_data)
@@ -197,13 +210,17 @@ if __name__ == "__main__":
         "--preference", choices=PARKING_PREFERENCES + ("any",), help="생략하면 기본 다섯 조합을 저장"
     )
     parser.add_argument("--parking-type", choices=PARKING_TYPES, help="단일 조건의 주차칸 유형")
+    parser.add_argument("--occupancy", help="주차칸 ID 기반 점유 JSON 경로")
+    parser.add_argument("--occupancy-ttl", type=float, default=5.0, help="점유 유효 시간(초)")
     args = parser.parse_args()
     if args.parking_type and not args.preference:
         parser.error("--parking-type은 --preference와 함께 지정하세요.")
     config = get_map_config(args.map_id, output_root=args.output_dir)
     preferences = (args.preference,) if args.preference else None
+    occupancy = load_occupancy(args.occupancy) if args.occupancy else None
     for png_path, json_path in export_routes(
-        config, preferences, parking_type=args.parking_type or "normal"
+        config, preferences, parking_type=args.parking_type or "normal",
+        occupancy=occupancy, max_age_seconds=args.occupancy_ttl,
     ):
         print(f"PNG  {png_path}")
         print(f"JSON {json_path}")

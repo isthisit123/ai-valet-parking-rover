@@ -4,6 +4,7 @@ import math
 import networkx as nx
 
 from .map_config import DEFAULT_MAP, create_map_parser, get_map_config
+from .occupancy import load_occupancy, occupancy_states
 
 
 PARKING_PREFERENCES = ("exit", "entrance", "building_a", "building_b")
@@ -62,12 +63,17 @@ def distance_to_building(node, building):
     return math.hypot(dx, dy)
 
 
-def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path, parking_type="normal"):
+def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path, parking_type="normal",
+                   occupancy=None, max_age_seconds=5.0, now=None):
     map_data, graph = load_parking_map(map_path)
-    return select_parking_from_map(map_data, graph, preference, parking_type=parking_type)
+    return select_parking_from_map(
+        map_data, graph, preference, parking_type=parking_type,
+        occupancy=occupancy, max_age_seconds=max_age_seconds, now=now,
+    )
 
 
-def select_parking_from_map(map_data, graph, preference, *, parking_type="normal"):
+def select_parking_from_map(map_data, graph, preference, *, parking_type="normal",
+                            occupancy=None, max_age_seconds=5.0, now=None):
     # 입구 노드 확인
     entrance = get_node_by_role(map_data, "entrance")
     start_id = entrance["id"]
@@ -76,12 +82,18 @@ def select_parking_from_map(map_data, graph, preference, *, parking_type="normal
         raise ValueError(f"Unknown parking type: {parking_type}")
 
     # 요청한 유형의 주차칸만 후보에 넣는다. 기본 유형은 일반 주차칸이다.
-    # 점유 정보 연동 전에는 해당 후보가 비어 있다고 가정한다.
+    # 점유 정보가 없으면 기존 정적 지도 시뮬레이션으로 동작한다.
     parking_role = f"parking_{parking_type}"
     parking_nodes = [
         node for node in map_data["nodes"]
         if node.get("role") == parking_role
     ]
+
+    if occupancy is not None:
+        states = occupancy_states(map_data, occupancy, max_age_seconds=max_age_seconds, now=now)
+        parking_nodes = [node for node in parking_nodes if states[node["region_id"]] == "free"]
+        if not parking_nodes:
+            raise ValueError(f"최신 free 상태의 {parking_type} 주차칸이 없습니다.")
 
     if not parking_nodes:
         raise ValueError(f"No {parking_type} parking spaces found")
@@ -136,7 +148,7 @@ def select_parking_from_map(map_data, graph, preference, *, parking_type="normal
         graph, start_id, target=best_parking, weight="weight"
     )
 
-    return {
+    result = {
         "preference": preference,
         "selected": best_parking,
         "score": round(best_score, 2),
@@ -144,6 +156,12 @@ def select_parking_from_map(map_data, graph, preference, *, parking_type="normal
         "route_distance": round(route_distance, 2),
         "unit": map_data["unit"]
     }
+    if occupancy is not None:
+        result.update(
+            parking_space_id=graph.nodes[best_parking]["region_id"],
+            occupancy_status="free", occupancy_observed_at=occupancy["observed_at"],
+        )
+    return result
 
 
 if __name__ == "__main__":
@@ -152,16 +170,26 @@ if __name__ == "__main__":
         "--parking-type", choices=PARKING_TYPES, default="normal",
         help="선택할 주차칸 유형 (기본값 normal)",
     )
+    parser.add_argument("--occupancy", help="주차칸 ID 기반 점유 JSON 경로")
+    parser.add_argument("--occupancy-ttl", type=float, default=5.0, help="점유 유효 시간(초)")
     args = parser.parse_args()
     config = get_map_config(args.map_id, output_root=args.output_dir)
     map_data, graph = load_parking_map(config.semantic_path)
+    occupancy = load_occupancy(args.occupancy) if args.occupancy else None
+    if occupancy is None:
+        print("정적 지도 시뮬레이션: 실제 빈자리 여부는 확인하지 않습니다.")
 
     for preference in PARKING_PREFERENCES:
-        result = select_parking_from_map(map_data, graph, preference, parking_type=args.parking_type)
+        result = select_parking_from_map(
+            map_data, graph, preference, parking_type=args.parking_type,
+            occupancy=occupancy, max_age_seconds=args.occupancy_ttl,
+        )
 
         print()
         print("Preference:", result["preference"])
         print("Selected:", result["selected"])
+        if occupancy is not None:
+            print("Parking space:", result["parking_space_id"], result["occupancy_status"])
         print("Score:", result["score"])
         print("Route:", " -> ".join(result["route"]))
         print("Route distance:", result["route_distance"])

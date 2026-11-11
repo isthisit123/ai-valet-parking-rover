@@ -11,6 +11,7 @@ from .map_config import (
     DEFAULT_MAP,
     GATE_REGION,
     REAL_ACCESSIBLE_REGION,
+    REAL_DARK_MIN_FILL_RATIO,
     REAL_DARK_OPEN_KERNEL_SIZE,
     REAL_MAP_ID,
     REGION_BORDER_MARGIN,
@@ -26,7 +27,8 @@ from .map_reader import load_map_image
 from .planar_calibration import load_world_to_image, project_points
 
 
-def extract_regions(mask, min_area, image_shape, *, allow_border=False):
+def extract_regions(mask, min_area, image_shape, *, allow_border=False,
+                    min_fill_ratio=REGION_MIN_FILL_RATIO):
     # 같은 색상으로 연결된 영역을 각각 검출
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8
@@ -58,7 +60,7 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False):
             continue
 
         # 테두리나 배경의 가느다란 조각은 실제 사각형 영역에서 제외
-        if area / (w * h) < REGION_MIN_FILL_RATIO:
+        if area / (w * h) < min_fill_ratio:
             continue
 
         cx, cy = centroids[i]
@@ -94,7 +96,10 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id):
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, opening_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         regions.append(
-            extract_regions(mask, min_area, image.shape, allow_border=is_real_dark)
+            extract_regions(
+                mask, min_area, image.shape, allow_border=is_real_dark,
+                min_fill_ratio=REAL_DARK_MIN_FILL_RATIO if is_real_dark else REGION_MIN_FILL_RATIO,
+            )
         )
     return tuple(regions)
 

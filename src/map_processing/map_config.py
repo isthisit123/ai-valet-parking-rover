@@ -26,6 +26,8 @@ GATE_REGION = ((0, 0, 150), (179, 85, 238), 1500)
 REGION_CLOSE_KERNEL_SIZE = (3, 3)
 # 실물 사진에서 입구에 가늘게 이어진 그림자를 끊는다.
 REAL_DARK_OPEN_KERNEL_SIZE = (7, 7)
+# 임시 완화: 그림자가 붙은 실물 입구 후보를 보존한다. 재검토 사항은 ROADMAP 참고.
+REAL_DARK_MIN_FILL_RATIO = 0.5
 REGION_MAX_IMAGE_RATIO = 0.08
 REGION_BORDER_MARGIN = 1
 REGION_MIN_SIDE = 20

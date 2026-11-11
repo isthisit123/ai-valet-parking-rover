@@ -1,5 +1,130 @@
 # Q-ROVER — AI Valet Parking Rover
 
+## ParkingHaeven 저장 점유 파일로 경로 재현 (단계 3)
+
+```powershell
+python -m scripts.parkinghaeven_replay --source 'C:\Users\urmkm\Downloads\all_parking_regions (1).json'
+```
+
+`src` 변경 없이 별도 스크립트가 아래 파일을 읽어 정적 테스트를 실행합니다.
+
+- 원본 ParkingHaeven 점유 JSON (`--source`)
+- `assets/maps/parking_map_real_parkinghaeven_mapping.json`: 원본 ID와 지도 ID, 좌표 변환
+- `data/maps/parking_map_real/semantic.json`: 현재 그래프와 시설 정보
+- `assets/maps/parking_map_real.png`: 지도 일치 검증과 경로 시각화
+
+변환한 점유 상태는 `data/occupancy/parking_map_real/test_snapshot.json`, 검증 결과는 같은
+폴더의 `test_results.json`에 저장합니다. 경로는 기존 `routes/` 대신
+`data/maps/parking_map_real/occupancy_test_routes/`에 저장합니다.
+원본 영역 ID/좌표와 지도 이미지 해시를 확인하고, 변환 다각형과 해당 주차칸 bbox의
+IoU가 0.5 이상이며 다른 칸보다 가장 많이 겹치는지 검증합니다. 실제 주차칸 윤곽선과의
+IoU나 카메라 회전 대응을 검증한 것은 아닙니다.
+
+제공된 점유 파일에서는 `space_1`, `space_5`, `space_6`이 점유 상태입니다.
+기본 다섯 케이스와 일반석 입구/건물 B 두 케이스를 실행합니다.
+일반석 입구/건물 B 선택은 `space_1`에서 `space_2`로 바뀌고,
+장애인석 세 케이스는 빈칸이 없어 경로 대신 `no_free_spaces` 결과를 저장합니다.
+기본 다섯 케이스의 출력과 점유 테스트 출력은 별개입니다.
+
+원본에는 관측 시각·신뢰도·실패 구분이 없습니다. 저장 스냅샷은 `observed_at: null`,
+`confidence: null`, `usage: offline_test_only`로 이를 보존하며 `current.json`은 생성하지 않습니다.
+재현 스크립트 내부에서만 boolean을 정답으로 가정해 신뢰도 1.0의 fixture와
+고정 테스트 시각 `2000-01-01T00:00:00+00:00`을 사용합니다. 이는 모델 점수가 아니며,
+실제 현재 시각의 소비자에서는 만료됩니다. `test_snapshot.json`을 기존 selector의
+`--occupancy`에 직접 전달하면 시각 검증에서 거부됩니다. 재현은 위 스크립트로 실행하세요.
+실시간 `occupied: false`를 무조건 안전한 빈칸으로 해석하는 연동은 아직 하지 않았습니다.
+
+```powershell
+python -m unittest discover -s tests -p test_parkinghaeven_replay.py -v
+python -m unittest discover -s tests -p 'test*occupancy.py' -v
+```
+
+## 주차 점유 JSON 연결 (2026-11-11)
+
+`parking_training_kit`의 학습 사진·라벨은 모델 입력 데이터입니다. 학습 모델은 별도 폴더인
+`C:\Users\urmkm\Desktop\ParkingHaeven\Source\models\parking_cars.onnx`에서 확인했습니다.
+OpenCV ONNX 추론으로 학습 사진 한 장에서 차량 3대 검출까지 확인했습니다.
+**ONNX → 카메라 ROI별 점유 JSON → 최신 free 칸 선택 → 픽셀 경로 생성**을 지원합니다.
+새로운 의존성은 없습니다. 실제 카메라의 6칸 ROI 설정과 빈 배경 사진 확인은 아직 필요합니다.
+
+### 실제 카메라 설정 순서
+
+프로젝트 루트에서 실행합니다. 카메라 번호는 장치에 맞게 바꿉니다. 먼저 주차장을 비우고
+카메라를 고정한 뒤 기준 사진을 저장합니다. 아래 추론 명령은 한 프레임만 처리합니다.
+
+```powershell
+$parkingModel = 'C:\Users\urmkm\Desktop\ParkingHaeven\Source\models\parking_cars.onnx'
+# 1. 카메라 원본 한 장 저장 (차량을 모두 치운 상태)
+.\.venv\Scripts\python.exe -m src.parking_detection.onnx_occupancy --model $parkingModel --camera 1 --output archives/occupancy_setup/initial.json --save-frame archives/occupancy_setup/empty.png
+
+# 2. 지도 ID 안내 창을 보며 카메라 사진의 각 칸 네 모서리를 순서대로 클릭
+# Enter: 확정, R: 현재 칸 다시 지정, Esc: 취소. 실제로 빈 사진인지 확인한 경우에만 플래그 사용
+.\.venv\Scripts\python.exe -m src.parking_detection.configure_regions --image archives/occupancy_setup/empty.png --output archives/occupancy_setup/regions.json --verified-empty-reference
+
+# 3. 차량을 놓은 후 현재 프레임 점유 JSON 생성
+.\.venv\Scripts\python.exe -m src.parking_detection.onnx_occupancy --model $parkingModel --camera 1 --regions archives/occupancy_setup/regions.json --empty-reference archives/occupancy_setup/empty.png --output archives/occupancy_setup/current.json --preview archives/occupancy_setup/current.png
+
+# 4. TTL(기본 5초) 안에 실행. 만료 시 3번을 다시 실행
+.\.venv\Scripts\python.exe -m src.map_processing.parking_selector --occupancy archives/occupancy_setup/current.json
+```
+
+ROI는 원본 **카메라 픽셀**의 볼록 다각형이며 지도 bbox와 별도입니다. 카메라 해상도가 다르면
+오류로 중단합니다. 카메라 위치·줌·초점이 바뀌면 같은 해상도라도 다시 지정해야 합니다.
+빈칸은 차량 후보가 없고, 직접 확인한 빈 기준 사진과 ROI 픽셀의 98% 이상이 채널별 차이
+20 이하일 때만 판정합니다. 신뢰도 필드는 이때 배경 일치율이며 보정된 확률이 아닙니다.
+이 수치는 초기 실험 기준으로 실제 조명/차량에서 검증해야 합니다. 낮은 차량 검출 점수나
+기준 사진 불일치·손/물체 등은 unknown으로 남깁니다. 기준 사진 없이도 occupied 판정은 가능합니다.
+ROI 설정 없이 실행하면 차량 bbox만 기록하고 모든 칸은 unknown입니다.
+사진 입력 `--image`는 파일 수정 시각을 관측 시각으로 사용하므로 오래된 사진을 최신 관측으로
+취급하지 않습니다. 실제 카메라/웹 화면의 연속 추론, 자동 갱신·재계획은 아직 연결하지 않았습니다.
+
+### 점유 JSON과 선택 계약
+
+지도에서 사용하는 실제 ID는 `space_1`~`space_6`입니다. `P01`이나 `N0`로 바꾸지 않습니다.
+검출 생산자는 고정 카메라의 주차칸 ROI마다 이 ID를 연결해야 합니다. 카메라 구도·해상도가
+변하면 ROI를 다시 확인합니다. 지도 bbox와 다른 카메라 영상의 bbox를 직접 비교하지 않습니다.
+`parking_training_kit/YOLODetector.js`의 현재 `occupied` boolean만으로는 추론 실패와 빈칸을
+구별할 수 없으므로, 그 결과를 그대로 free로 변환하면 안 됩니다.
+
+소비하는 형식은 `docs/TEAM_GUIDE.md`의 `0.1-draft`입니다. 전체 스냅샷에 **실제 프레임 관측 시각**을
+시간대 포함 ISO 8601로 넣습니다. 과거 칸별 결과를 새 시각과 섞지 않습니다.
+
+```json
+{
+  "schema_version": "0.1-draft",
+  "map_id": "parking_map_real",
+  "observed_at": "2026-11-11T18:00:00+09:00",
+  "spaces": [
+    {"parking_space_id": "space_1", "status": "occupied", "confidence": 0.96},
+    {"parking_space_id": "space_2", "status": "free", "confidence": 0.91},
+    {"parking_space_id": "space_3", "status": "unknown", "confidence": null}
+  ]
+}
+```
+
+위 시각은 설명용입니다. 실행 시 최신 관측 시각으로 생성한 JSON이 필요합니다.
+기본 TTL은 5초이며, 미래 시각·만료·누락 칸은 unknown으로 취급합니다. free에는
+생산자가 판정한 점유 신뢰도 0.5 이상이 필요합니다. TTL과 신뢰도 기준은 초기 통합용이며
+실제 카메라에서 검증한 수치가 아닙니다. 차량 탐지 점수는 빈칸 신뢰도가 아닙니다.
+잘못된 지도 ID, 중복/알 수 없는 칸 ID, 잘못된 상태는 오류로 드러납니다.
+
+```powershell
+# 최신 점유 스냅샷을 읽어 조건별 빈 주차칸 선택
+python -m src.map_processing.parking_selector --occupancy occupancy.json --occupancy-ttl 5
+
+# 원본 결과 보호: 다른 폴더의 semantic.json을 읽고 그 폴더에 경로 저장
+python -m src.map_processing.graph_exporter --output-dir temp_results
+python -m src.map_processing.semantic_mapper --output-dir temp_results
+python -m src.map_processing.path_visualizer --output-dir temp_results --occupancy occupancy.json --preference entrance --parking-type normal
+
+python -m unittest discover -s tests -v
+```
+
+점유 옵션을 생략하면 기존 정적 시뮬레이션입니다. 실제 빈자리를 확인한 결과가 아닙니다.
+점유를 전달하면 free 후보가 없는 경우 오류로 중단합니다. 경로 JSON에는 선택 당시
+`occupancy_status`와 `occupancy_observed_at`이 추가됩니다. 생성된 경로는 픽셀 단위이며
+실시간 감시·예약·주행 중 재계획·모터 제어는 포함하지 않습니다.
+
 > **Arduino UNO Q 기반 모형 주차장 자율 발렛파킹 프로젝트**  
 > **현재 단계:** 실물 지도 인식, 주차칸 선택, 다섯 가지 조건의 경로 PNG와 픽셀 waypoint JSON 생성
 
@@ -209,7 +334,10 @@ python -m src.map_processing.graph_builder
 
 ## 7. 검증 결과
 
-현재 기본 실물 사진에서 아래 결과를 확인했습니다.
+2026-11-11 새로 제공된 1280×720 사진을 PNG로 변환해 기본 지도로 교체했습니다.
+JPG를 디코딩한 픽셀과 PNG 픽셀의 동일성을 확인했으며, 크롭·리사이즈·원근 보정은 하지 않았습니다.
+기존 검출 설정과 위치 힌트로 아래 결과를 확인했습니다. 빨간 십자 표식은 도로에서 제외됐고,
+주차칸 `space_1`~`space_6`의 물리적 위치와 ID는 유지됐습니다.
 
 | 검증 항목 | 실물 지도 |
 | --- | --- |
@@ -225,9 +353,9 @@ python -m src.map_processing.graph_builder
 ```text
 Preference: building_b
 Selected: N5
-Score: 140.00
+Score: 144.00
 Route: N3 -> N8 -> N10 -> N5
-Route distance: 294.50
+Route distance: 293.96
 ```
 
 다섯 케이스의 선택 주차칸과 경로를 테스트하고, waypoint가 도로 영역 안에 있으며 인접 점 사이가 최대 대각선 1픽셀 간격인지 확인합니다. 테스트는 `archives/` 자료에 의존하지 않습니다.

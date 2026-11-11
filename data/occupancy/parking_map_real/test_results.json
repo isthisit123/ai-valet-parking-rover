@@ -1,0 +1,112 @@
+{
+  "map_id": "parking_map_real",
+  "usage": "offline_test_only",
+  "snapshot_observed_at": null,
+  "simulation_clock": "2000-01-01T00:00:00+00:00",
+  "confidence_basis": "synthetic_test_truth_not_detector_confidence",
+  "iou_threshold": 0.5,
+  "iou_target_geometry": "semantic_region_bbox",
+  "mapping_overlap": [
+    {
+      "parking_space_id": "space_1",
+      "bbox_iou": 0.8295761289851901
+    },
+    {
+      "parking_space_id": "space_2",
+      "bbox_iou": 0.8383252312999843
+    },
+    {
+      "parking_space_id": "space_3",
+      "bbox_iou": 0.8302274394717535
+    },
+    {
+      "parking_space_id": "space_4",
+      "bbox_iou": 0.896657655443598
+    },
+    {
+      "parking_space_id": "space_5",
+      "bbox_iou": 0.8454017496140557
+    },
+    {
+      "parking_space_id": "space_6",
+      "bbox_iou": 0.7663377268649506
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "01_building_a",
+      "preference": "building_a",
+      "parking_type": "normal",
+      "baseline_parking_space_id": "space_3",
+      "outcome": "route_created",
+      "selected": "space_3",
+      "destination_changed": false,
+      "total_distance": 687.13,
+      "unit": "pixel"
+    },
+    {
+      "case_id": "02_accessible",
+      "preference": "any",
+      "parking_type": "accessible",
+      "baseline_parking_space_id": "space_5",
+      "outcome": "no_free_spaces",
+      "selected": null,
+      "message": "최신 free 상태의 accessible 주차칸이 없습니다."
+    },
+    {
+      "case_id": "03_exit",
+      "preference": "exit",
+      "parking_type": "normal",
+      "baseline_parking_space_id": "space_3",
+      "outcome": "route_created",
+      "selected": "space_3",
+      "destination_changed": false,
+      "total_distance": 687.13,
+      "unit": "pixel"
+    },
+    {
+      "case_id": "04_building_b_accessible",
+      "preference": "building_b",
+      "parking_type": "accessible",
+      "baseline_parking_space_id": "space_6",
+      "outcome": "no_free_spaces",
+      "selected": null,
+      "message": "최신 free 상태의 accessible 주차칸이 없습니다."
+    },
+    {
+      "case_id": "05_entrance_accessible",
+      "preference": "entrance",
+      "parking_type": "accessible",
+      "baseline_parking_space_id": "space_6",
+      "outcome": "no_free_spaces",
+      "selected": null,
+      "message": "최신 free 상태의 accessible 주차칸이 없습니다."
+    },
+    {
+      "case_id": "06_entrance_normal",
+      "preference": "entrance",
+      "parking_type": "normal",
+      "baseline_parking_space_id": "space_1",
+      "outcome": "route_created",
+      "selected": "space_2",
+      "destination_changed": true,
+      "total_distance": 371.88,
+      "unit": "pixel"
+    },
+    {
+      "case_id": "07_building_b_normal",
+      "preference": "building_b",
+      "parking_type": "normal",
+      "baseline_parking_space_id": "space_1",
+      "outcome": "route_created",
+      "selected": "space_2",
+      "destination_changed": true,
+      "total_distance": 371.88,
+      "unit": "pixel"
+    }
+  ],
+  "additional_checks": {
+    "stale_replay_rejected_by_live_clock": true,
+    "all_occupied_rejected_for_both_types": true
+  }
+}

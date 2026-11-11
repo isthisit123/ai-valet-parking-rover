@@ -25,10 +25,10 @@ MAP_CASES = {
     REAL_MAP_ID: {
         "nodes": ("N0", "N1", "N7", "N6", "N2", "N5"),
         "routes": {
-            "exit": (172.68, "N3 N8 N10 N9 N12 N11 N13 N7", 687.20),
-            "entrance": (185.61, "N3 N8 N0", 185.61),
-            "building_a": (135.00, "N3 N8 N10 N9 N12 N11 N13 N7", 687.20),
-            "building_b": (149.38, "N3 N8 N0", 185.61),
+            "exit": (173.29, "N3 N8 N10 N9 N12 N11 N13 N7", 691.33),
+            "entrance": (188.75, "N3 N8 N0", 188.75),
+            "building_a": (133.00, "N3 N8 N10 N9 N12 N11 N13 N7", 691.33),
+            "building_b": (153.70, "N3 N8 N0", 188.75),
         },
     },
 }
@@ -126,10 +126,10 @@ class ParkingIdsTest(unittest.TestCase):
             )
         map_data, graph = parking_selector.load_parking_map(config.semantic_path)
         expected = {
-            "exit": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 558.91),
-            "entrance": ("space_6", "N3 N8 N10 N5", 294.50),
-            "building_a": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 558.91),
-            "building_b": ("space_6", "N3 N8 N10 N5", 294.50),
+            "exit": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 562.56),
+            "entrance": ("space_6", "N3 N8 N10 N5", 293.96),
+            "building_a": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 562.56),
+            "building_b": ("space_6", "N3 N8 N10 N5", 293.96),
         }
         for preference, (space_id, route, distance) in expected.items():
             with self.subTest(preference=preference):
@@ -243,7 +243,8 @@ class ParkingIdsTest(unittest.TestCase):
                 normal, accessible, buildings, gates = semantic_mapper.detect_regions(
                     map_reader.load_map_image(config.image_path), map_id=map_id
                 )
-                self.assertEqual(tuple(map(len, (normal, accessible, gates))), (4, 2, 0))
+                # 실물 입출구는 검은색 시설로 매칭한다. 밝은 배경 후보 수는 의미가 없다.
+                self.assertEqual(tuple(map(len, (normal, accessible))), (4, 2))
                 spaces = {
                     region["id"]: region for region in original["regions"]
                     if region["role"] in ("parking_normal", "parking_accessible")

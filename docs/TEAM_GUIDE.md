@@ -1,5 +1,18 @@
 # TEAM_GUIDE.md — 팀 협업 및 모듈 통합 가이드
 
+### 2026-11-11 로컬 점유 소비 인터페이스 추가
+
+`src/map_processing/occupancy.py`와 selector/visualizer의 선택적 `occupancy` 인자가
+3.2절의 `schema_version: 0.1-draft`를 소비합니다. 실제 지도 칸 ID는 `space_1`~`space_6`입니다.
+기존 JSON과 함수의 기본 동작은 보존하고, 점유 옵션 사용 시에만 최신 free 칸으로 제한합니다.
+TTL 기본 5초, free 점유 신뢰도 최소 0.5는 초기 통합 기준입니다. 생산자와 실측 검증 후 조정해야 합니다.
+누락·오래된 상태는 unknown이며, 중복/잘못된 ID는 오류입니다. 자세한 실행은 README를 참조합니다.
+학습 키트와 ParkingHaeven 파일은 변경하지 않았습니다. 외부 `parking_cars.onnx`를 기존
+OpenCV로 읽는 `src/parking_detection/onnx_occupancy.py`와 ROI 지정 도구를 추가했습니다.
+학습 사진 한 장에서 차량 3대 검출을 확인했습니다. ROI 미지정은 unknown, 검출 차량의
+ROI 겹침은 occupied, 검증된 빈 배경과의 일치는 free입니다. free 신뢰도는 배경 일치율이며
+차량 탐지 확률과 다릅니다. 실제 카메라 ROI 지정·빈 배경 확인 및 현장 정확도 검증은 남아 있습니다.
+
 > **프로젝트:** [AI Valet Parking Rover](../README.md) · **작성 기준:** 2026-11-10  
 > 팀원과 Codex가 담당 범위, 공통 데이터 형식, GitHub 작업 방식을 공유하기 위한 문서.  
 > 아래 예시 소스 경로와 JSON 계약은 **권장안**으로, 실제 구현 전에 저장소 소스와 비교해야 한다.

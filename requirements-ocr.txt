@@ -1,0 +1,4 @@
+# 건물 A/B OCR 시험용 독립 환경 (.venv-ocr)에 설치
+# RapidOCR가 opencv-python-headless를 요구하므로 기존 .venv와 분리한다.
+rapidocr==3.10.0
+onnxruntime==1.31.1

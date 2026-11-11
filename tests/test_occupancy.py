@@ -68,11 +68,11 @@ class OccupancyTest(unittest.TestCase):
 
     def test_accessible_is_not_a_normal_candidate(self):
         self.snapshot["spaces"] = [
-            {"parking_space_id": "space_5", "status": "free", "confidence": 0.9}
+            {"parking_space_id": "space_3", "status": "free", "confidence": 0.9}
         ]
         with self.assertRaisesRegex(ValueError, "free"):
             self.select()
-        self.assertEqual(self.select(parking_type="accessible")["parking_space_id"], "space_5")
+        self.assertEqual(self.select(parking_type="accessible")["parking_space_id"], "space_3")
 
     def test_route_metadata_and_legacy_selection(self):
         import cv2

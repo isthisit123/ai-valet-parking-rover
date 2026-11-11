@@ -28,6 +28,8 @@ def save_json(path, data):
 
 
 def convert_export(payload, mapping):
+    if mapping.get("status", "active") != "active":
+        raise ValueError("지도 번호/구도가 변경됐습니다. 새 ParkingHaeven 영역 JSON으로 매핑을 재설정하세요.")
     # JSON의 점유 boolean은 테스트 정답으로만 사용한다. 미관측 실패를 구별하지 못한다.
     entries = payload[mapping["source"]["source_id"]]
     by_id = {}
@@ -118,6 +120,8 @@ def validate_mapping(mapping, map_data, image):
 
 def run(source_path, mapping_path, output_dir, routes_dir):
     mapping = json.loads(mapping_path.read_text(encoding="utf-8-sig"))
+    if mapping.get("status", "active") != "active":
+        raise ValueError("현재 매핑은 재설정이 필요합니다. 이전 점유 JSON을 새 지도에 적용하지 않습니다.")
     config = get_map_config(mapping["map_id"])
     if hashlib.sha256(config.image_path.read_bytes()).hexdigest() != mapping["target"]["image_sha256"]:
         raise ValueError("지도가 매핑 생성 당시와 다릅니다. 변환을 재확인하세요.")

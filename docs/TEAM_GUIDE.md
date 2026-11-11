@@ -1,5 +1,15 @@
 # TEAM_GUIDE.md — 팀 협업 및 모듈 통합 가이드
 
+### 2026-11-11 최신 OCR 표기 기준 ID/유형 갱신
+
+사용자 요청으로 A/B, P1~P6, EN/EX 사진을 기본 지도로 채택했습니다. 일반석은 P1/P2/P4/P5,
+장애인석은 P3/P6이며 ID는 각 인쇄 번호와 대응하는 `space_1`~`space_6`입니다.
+`id_assignment_revision`은 `ocr-p-labels-v1`이며 라벨/매핑 파일에 기록합니다.
+기존 물리 칸의 ID를 재할당한 변경이므로 옛 점유 스냅샷의 같은 문자열 ID를 새 칸으로 해석하면 안 됩니다.
+ParkingHaeven의 원본 ID 대응만 이관하고 새 구도의 영역 좌표가 없어 매핑을 무효화했습니다.
+`status: requires_new_camera_regions`인 매핑은 점유 재현에 사용할 수 없습니다.
+새 영역 JSON으로 변환/IoU를 검증한 후 다시 활성화해야 합니다.
+
 ### 2026-11-11 로컬 점유 소비 인터페이스 추가
 
 `src/map_processing/occupancy.py`와 selector/visualizer의 선택적 `occupancy` 인자가

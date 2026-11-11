@@ -1,6 +1,152 @@
 # Q-ROVER — AI Valet Parking Rover
 
-## ParkingHaeven 저장 점유 파일로 경로 재현 (단계 3)
+## 현재 기본 지도 — OCR 이름표 기준 (2026-11-11)
+
+최신 `parking_map_ocr.png`에서 A/B·P1~P6·EN/EX 10개를 인식한 결과로
+`parking_map_real_labels.json`의 힌트를 갱신했습니다. 일반석은 **P1/P2/P4/P5**,
+장애인석은 **P3/P6**입니다. A는 왼쪽 아래, B는 오른쪽 위입니다.
+번호를 새로 부착한 사용자 요청에 따른 명시적인 ID 재할당이며 기존 ID 유지 검증과 구분합니다.
+
+`parking_map_real.png`는 OCR 원본에서 주차장 종이 바깥만 흰색으로 처리한 지도 입력입니다.
+원본 OCR 사진은 그대로 유지하며 크기/픽셀 좌표는 1280×720으로 동일합니다.
+EX 검은 영역이 오른쪽 배경과 연결돼 검출에서 제외되는 문제를 피하기 위한 처리입니다.
+외곽점은 이번 사진에서 수동 확인했으며 `parking_map_real_preparation.json`에 저장했습니다.
+카메라 구도가 바뀌면 외곽점도 다시 확인해야 합니다. `src` 검출 로직은 이번 갱신에서 바꾸지 않았습니다.
+
+기본 `graph.json`, `semantic.json`, 다섯 경로 PNG/JSON과 테스트 기준값도 재생성했습니다.
+14노드·13간선·연결 True, 일반 4·장애인 2·건물 2·입출구 2이며 전체 테스트 40개가 통과했습니다.
+
+옛 칸 ID → 현재 ID는 `space_1→1`, `space_2→2`, `space_3→4`, `space_4→5`,
+`space_5→3`, `space_6→6`입니다(화살표 오른쪽 숫자도 `space_` 접두사를 가짐).
+ParkingHaeven 매핑의 ID 대응은 이관했지만 **새 구도의 영역 좌표가 없으므로**
+상태는 `requires_new_camera_regions`, 변환 행렬은 null입니다. 옛 점유 파일은 사용하지 않습니다.
+기존 지도·라벨·매핑·점유 시험 결과는 `archives/before_ocr_rule_update_20261111_221709/`에 보관했습니다.
+
+## 시설 표기 OCR 시험 — A, B, P1~P6, EN, EX
+
+`scripts/ocr_buildings.py`는 다음 고정 표기를 읽는 독립 시험 도구입니다.
+
+| 인쇄 표기 | 프로젝트 ID |
+| --- | --- |
+| `A`, `B` | `building_a`, `building_b` |
+| `P1`~`P6` | `space_1`~`space_6` |
+| `EN`, `EX` | `entrance`, `exit` |
+
+기본 실행에서 A/B 한 글자를 바로 허용합니다. 영문 대소문자·앞뒤 공백·전각 표기는 정규화하지만,
+`I`를 `1`로, `8`을 `B`로 추측하지 않습니다. 이전 `BUILDING_A/B`는 새 표기 규칙의 대상이 아닙니다.
+이름표는 크게 인쇄하고 주변의 다른 문자와 떨어뜨려 배치하세요.
+주차칸은 P가 붙은 `P1`~`P6`만 허용하며 단독 숫자 `1`~`6`은 채택하지 않습니다.
+
+RapidOCR/ONNX Runtime을 CPU에서 사용합니다. RapidOCR의 `opencv-python-headless`가 기존 GUI용
+OpenCV와 충돌하지 않도록 **기존 `.venv`와 별도인 `.venv-ocr`**에 설치합니다.
+이 PC의 OCR 전용 환경은 설치·실행 확인했습니다. 다른 환경에서 처음 설치할 때는 다음을 사용합니다.
+
+```powershell
+python -m venv .venv-ocr
+.\.venv\Scripts\python.exe -m pip --python .\.venv-ocr\Scripts\python.exe install -r requirements-ocr.txt
+```
+
+실행할 때 활성화할 필요 없이 OCR용 Python을 직접 지정합니다.
+
+```powershell
+.\.venv-ocr\Scripts\python.exe -m scripts.ocr_buildings --image 'assets/maps/parking_map_ocr.png'
+# 아직 A/B만 붙인 사진은 두 건물만 필수 검사
+.\.venv-ocr\Scripts\python.exe -m scripts.ocr_buildings --image 'assets/maps/parking_map_ocr.png' --buildings-only
+```
+
+HTTP로 받은 `data/http_map_captures/<capture_id>/source.png`도 `--image`에 지정할 수 있습니다.
+현재 HTTP 버튼은 OCR을 자동 실행하지 않습니다. 파일을 받아 위 명령으로 별도 시험합니다.
+
+결과는 Git 제외 `data/ocr_building_tests/<회차>/report.json`과 `preview.png`에 저장합니다.
+JSON에는 전체 인식 원문, 원본 픽셀 사각형, 점수, 시설 10개의 인식 상태와 중심 후보를 기록합니다.
+전체 영상 OCR이 한 글자를 놓치면 기존 색상 검출 함수가 찾은 영역을 잘라 보완 인식합니다.
+초록/파란 주차 영역은 P1~P6만, 검은색 시설 후보는 A/B/EN/EX만 보완 대상으로 허용합니다.
+같은 영역에 이미 높은 점수의 인식이 있으면 재인식하지 않습니다. `box_kind`가
+`color_region_recognition`이면 사각형과 중심은 글자 자체가 아닌 **색상 후보 영역** 기준입니다.
+시설 전체 인식도 실패하면 내부의 밝고 낮은 채도 글자 후보를 좁게 잘라 3배 확대해 읽습니다.
+`P`와 `1`처럼 따로 떨어진 글자 조각은 높이·줄 위치·간격 조건을 만족할 때 묶어서 읽습니다.
+다른 줄이거나 멀리 떨어진 조각은 합치지 않으며 단독 `P`를 `P1`로 추측하지 않습니다.
+이 경우 `box_kind`는 `bright_text_patch`이며 좌표는 원본 픽셀로 기록합니다. 작은 반사/그림자로
+같은 글자가 겹쳐 검출된 경우만 병합하고, 떨어진 같은 ID나 서로 다른 ID 충돌은 자동 확정하지 않습니다.
+`region_attempts`에는 잘못 읽어 채택하지 않은 영역/글자 후보와 점수도 기록합니다.
+`--no-region-fallback`으로 보완 인식을 끄고 전체 영상 OCR과 비교할 수 있습니다.
+**중심 후보는 아직 전체 시설 매핑용 힌트로 검증되지 않았습니다.**
+기본 힌트 JSON과 `src`, 지도 생성 결과는 변경하지 않습니다.
+
+최소 점수 기본값 0.75는 초기 시험값입니다. `--min-score`로 바꿀 수 있습니다.
+누락·낮은 점수·같은 건물 ID 중복이면 결과를 보존하고 종료 코드 2 (`needs_review`),
+실행 자체가 실패하면 종료 코드 1, 필수 표기 모두 인식 성공은 종료 코드 0입니다.
+기본 필수 표기는 10개 전체이며 `--buildings-only`는 A/B만 필수로 검사합니다.
+이전 소형 숫자 이름표 사진은 이 전처리 후 A/B·1~6·EN/EX 모두 인식됐습니다.
+현재는 사용자 요청으로 주차칸 표기를 P1~P6으로 변경했고 관련 테스트 9개가 통과했습니다.
+P가 붙은 최신 사진에서 P1~P6·A/B·EN/EX 10개 인식을 확인했고, 관련 테스트는 현재 10개입니다.
+P1 누락은 `P`와 `1`의 글자 조각 분리 문제였으며 인접 글자 묶기로 해결했습니다.
+한 사진에서의 인식 결과이며 다른 조명·거리에서의 정확도와 전체 시설 매핑은 아직 검증하지 않았습니다.
+현재 기본 지도는 P3/P6을 장애인석으로 갱신했습니다. OCR 시험 도구 자체는 기본 라벨을
+덮어쓰지 않으며, 최신 기본 지도 반영은 위의 별도 검증/갱신 작업으로 수행했습니다.
+기존 `--allow-single-letter`는 이전 명령 호환용으로만 남아 있으며 지정할 필요 없습니다.
+
+```powershell
+.\.venv-ocr\Scripts\python.exe -m unittest discover -s tests -p test_ocr_buildings.py -v
+```
+
+## HTTP로 웹 PNG를 받아 맵 생성
+
+프로젝트 루트에서 다음 명령을 실행하고 **http://localhost:8001**을 엽니다.
+
+```powershell
+python -m scripts.http_map_server
+```
+
+이 서버는 옆 폴더 `../ParkingHaeven/Source`를 읽어 기존 웹 화면을 제공하면서 페이지 아래에
+**현재 화면 PNG 전송 · 맵 생성** 버튼을 추가합니다. ParkingHaeven 원본 파일과 `src`는
+수정하지 않습니다. 웹에서 카메라를 시작하고 차량을 모두 치운 상태에서 버튼을 누르세요.
+기존 카메라 사용 웹/앱이 같은 장치를 점유했다면 먼저 종료합니다. 사진 입력으로도 시험할 수 있습니다.
+
+원본 `main-canvas`만 복사해 `image/png` 본문으로 `POST /api/map-capture`에 전송합니다.
+별도 `overlay-canvas`의 주차칸 테두리/검출 박스는 들어가지 않습니다. Python은 카메라를 열지 않고
+수신 PNG를 그대로 저장한 다음 기존 그래프·시설 매핑 함수를 호출합니다. 새 패키지는 필요 없습니다.
+
+전송할 때마다 `data/http_map_captures/<capture_id>/`에 다음을 저장합니다.
+
+- `source.png`: 실제 받은 PNG, 크롭·리사이즈 없이 보존
+- `map.png`: 현재 종이 외곽 설정으로 바깥 배경을 제외한 지도 입력
+- `labels.json`: 받은 영상 좌표로 변환한 시설/주차칸 힌트
+- `graph.json`, `graph_preview.png`: 그래프와 미리보기
+- `semantic.json`: 시설 ID가 연결된 의미 지도 (성공한 경우)
+- `report.json`: 영상 크기, 수신 시각, 변환 조건, 생성 결과/오류
+
+이 폴더는 `.gitignore`에 등록했습니다. 기본 `assets/maps/parking_map_real.png`, 라벨 및
+`data/maps/parking_map_real/`의 기존 결과는 덮어쓰지 않습니다. 새로운 결과를 기본 지도로
+채택하거나 기존 점유 매핑과 자동으로 연결하는 작업은 아직 하지 않습니다.
+
+현재 힌트와 종이 외곽은 최신 1280×720 OCR 사진 기준입니다. 16:9 입력은 같은 구도라는 조건으로
+배율을 적용합니다. 기존 4:3 카메라 매핑은 무효화했으므로 그 변환을 재사용하지 않습니다.
+종횡비만으로 구도 일치를 증명하지는 못합니다. 카메라 위치/줌/크롭이 바뀌거나 지원하지 않는
+영상 비율이면 힌트/매핑을 다시 확인해야 합니다. 매핑 실패는 HTTP 422로 표시하고 받은 사진과
+중간 결과를 보존합니다. 그래프만 생성된 경우를 의미 지도 생성 성공으로 표시하지 않습니다.
+
+웹 루트나 포트를 변경하려면 다음 옵션을 사용합니다.
+
+```powershell
+python -m scripts.http_map_server --web-root 'C:\Users\urmkm\Desktop\ParkingHaeven\Source' --port 8001
+python -m unittest discover -s tests -p test_http_map_server.py -v
+```
+
+기존 `../parking_training_kit/aruco_server.py`가 있으면 해당 모듈의 `/api/aruco` 기능도 그대로
+사용합니다. 없으면 지도 전송 기능만 동작합니다. 포트가 다른 기존 웹 화면(예: 8000)과 새 화면(8001)은
+localStorage가 별개이므로 이전에 저장한 영역이 새 주소에 자동으로 나타나지는 않습니다.
+
+검증: 로컬 HTTP에서 저장 PNG 수신 → 14노드·13간선·연결 True → 일반 4·장애인 2·시설 총 10개
+의미 지도 생성, 원본 PNG 바이트 보존 및 기본 파일 미변경을 확인했습니다. HTTP/좌표/오류 처리 테스트
+현재 HTTP 관련 테스트 5개가 통과했습니다. 과거 4:3 합성 시험은 이전 지도에 대한 기록입니다.
+브라우저 버튼 표시는 확인했으며, 실제 카메라의 현재 프레임 전송은 사용자 카메라로 확인해야 합니다.
+
+## ParkingHaeven 저장 점유 파일로 경로 재현 (이전 지도 기록)
+
+**현재는 새 카메라 영역 JSON으로 매핑을 재설정해야 합니다. 아래 이전 실행 명령은
+무효화된 매핑에서 오류로 중단됩니다.** 옛 점유 상태를 새 번호의 칸에 적용하지 않습니다.
+이전 `test_snapshot.json`, `test_results.json`, `occupancy_test_routes`는 백업 폴더로 옮겼습니다.
 
 ```powershell
 python -m scripts.parkinghaeven_replay --source 'C:\Users\urmkm\Downloads\all_parking_regions (1).json'
@@ -334,10 +480,8 @@ python -m src.map_processing.graph_builder
 
 ## 7. 검증 결과
 
-2026-11-11 새로 제공된 1280×720 사진을 PNG로 변환해 기본 지도로 교체했습니다.
-JPG를 디코딩한 픽셀과 PNG 픽셀의 동일성을 확인했으며, 크롭·리사이즈·원근 보정은 하지 않았습니다.
-기존 검출 설정과 위치 힌트로 아래 결과를 확인했습니다. 빨간 십자 표식은 도로에서 제외됐고,
-주차칸 `space_1`~`space_6`의 물리적 위치와 ID는 유지됐습니다.
+현재는 최신 OCR 사진의 힌트와 종이 바깥 배경 처리 결과를 기본 입력으로 사용합니다.
+사진의 P번호에 맞춰 ID를 재할당하고 픽셀 크기와 좌표는 유지했습니다. 상세 변경은 문서 상단을 참고하세요.
 
 | 검증 항목 | 실물 지도 |
 | --- | --- |
@@ -353,9 +497,9 @@ JPG를 디코딩한 픽셀과 PNG 픽셀의 동일성을 확인했으며, 크롭
 ```text
 Preference: building_b
 Selected: N5
-Score: 144.00
-Route: N3 -> N8 -> N10 -> N5
-Route distance: 293.96
+Score: 92.00
+Route: N3 -> N8 -> N10 -> N9 -> N11 -> N12 -> N2
+Route distance: 565.93
 ```
 
 다섯 케이스의 선택 주차칸과 경로를 테스트하고, waypoint가 도로 영역 안에 있으며 인접 점 사이가 최대 대각선 1픽셀 간격인지 확인합니다. 테스트는 `archives/` 자료에 의존하지 않습니다.

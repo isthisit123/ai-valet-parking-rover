@@ -2,3 +2,5 @@ opencv-python
 numpy
 networkx
 scikit-image
+
+# 선택 OCR 시험: 별도 .venv-ocr 환경에 requirements-ocr.txt 설치 (README 참고)

@@ -1,5 +1,6 @@
 # Python 가상환경
 .venv/
+.venv-ocr/
 venv/
 
 # Python 캐시
@@ -18,3 +19,7 @@ Thumbs.db
 
 # 로컬 보관 자료
 /archives/
+
+# HTTP로 받은 원본 카메라 사진과 회차별 맵 결과
+/data/http_map_captures/
+/data/ocr_building_tests/

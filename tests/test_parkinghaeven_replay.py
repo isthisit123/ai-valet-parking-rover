@@ -38,6 +38,11 @@ class ParkingHaevenReplayTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "좌표"):
             convert_export(self.payload, self.mapping)
 
+    def test_invalidated_mapping_is_rejected_before_using_saved_states(self):
+        self.mapping["status"] = "requires_new_camera_regions"
+        with self.assertRaisesRegex(ValueError, "재설정"):
+            convert_export(self.payload, self.mapping)
+
     def test_duplicates_and_missing_boolean_are_rejected(self):
         original = copy.deepcopy(self.payload)
         for malformed in (self.entries + [self.entries[0]],

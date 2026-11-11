@@ -1,0 +1,30 @@
+{
+  "source_image": "assets/maps/parking_map_ocr.png",
+  "method": "outside_paper_mask_to_white_no_resize",
+  "paper_corners_px": [
+    [
+      308,
+      153
+    ],
+    [
+      1028,
+      184
+    ],
+    [
+      1205,
+      579
+    ],
+    [
+      210,
+      547
+    ]
+  ],
+  "corner_source": "manual_visual_selection_for_this_photo",
+  "reference_size_px": [
+    1280,
+    720
+  ],
+  "source_sha256": "06b6f889ee657ab98b73f38b93395ef38d977c4f4a5ea87663be7e050573a967",
+  "prepared_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd",
+  "condition": "최신 OCR 사진과 동일한 카메라 구도에서만 재사용. 외곽점은 이 사진에서 수동 확인."
+}

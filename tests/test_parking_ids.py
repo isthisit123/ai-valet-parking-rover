@@ -23,12 +23,12 @@ from src.map_processing.map_config import REAL_MAP_ID, get_map_config
 
 MAP_CASES = {
     REAL_MAP_ID: {
-        "nodes": ("N0", "N1", "N7", "N6", "N2", "N5"),
+        "nodes": ("N0", "N1", "N2", "N7", "N6", "N5"),
         "routes": {
-            "exit": (173.29, "N3 N8 N10 N9 N12 N11 N13 N7", 691.33),
-            "entrance": (188.75, "N3 N8 N0", 188.75),
-            "building_a": (133.00, "N3 N8 N10 N9 N12 N11 N13 N7", 691.33),
-            "building_b": (153.70, "N3 N8 N0", 188.75),
+            "exit": (170.55, "N3 N8 N10 N9 N11 N12 N13 N7", 694.02),
+            "entrance": (187.22, "N3 N8 N0", 187.22),
+            "building_a": (140.22, "N3 N8 N0", 187.22),
+            "building_b": (130.00, "N3 N8 N10 N9 N11 N12 N13 N7", 694.02),
         },
     },
 }
@@ -126,10 +126,10 @@ class ParkingIdsTest(unittest.TestCase):
             )
         map_data, graph = parking_selector.load_parking_map(config.semantic_path)
         expected = {
-            "exit": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 562.56),
-            "entrance": ("space_6", "N3 N8 N10 N5", 293.96),
-            "building_a": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 562.56),
-            "building_b": ("space_6", "N3 N8 N10 N5", 293.96),
+            "exit": ("space_3", "N3 N8 N10 N9 N11 N12 N2", 565.93),
+            "entrance": ("space_6", "N3 N8 N10 N5", 292.96),
+            "building_a": ("space_6", "N3 N8 N10 N5", 292.96),
+            "building_b": ("space_3", "N3 N8 N10 N9 N11 N12 N2", 565.93),
         }
         for preference, (space_id, route, distance) in expected.items():
             with self.subTest(preference=preference):
@@ -158,7 +158,7 @@ class ParkingIdsTest(unittest.TestCase):
         result = parking_selector.select_parking_from_map(
             renamed_data, renamed, "any", parking_type="accessible"
         )
-        self.assertEqual(renamed.nodes[result["selected"]]["region_id"], "space_5")
+        self.assertEqual(renamed.nodes[result["selected"]]["region_id"], "space_3")
 
     def test_real_map_matches_dim_blue_and_edge_touching_dark_facilities(self):
         image = np.full((300, 400, 3), 255, dtype=np.uint8)

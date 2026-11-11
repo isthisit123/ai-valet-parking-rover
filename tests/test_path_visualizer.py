@@ -10,14 +10,21 @@ import networkx as nx
 import numpy as np
 
 from src.map_processing import graph_exporter, map_reader, parking_selector, semantic_mapper
-from src.map_processing.map_config import DEFAULT_MAP_ID, TEST_MAP_ID, get_map_config
+from src.map_processing.map_config import DEFAULT_MAP_ID, get_map_config
 from src.map_processing.path_visualizer import ROUTE_COLOR, connect_waypoints, export_routes
 
 
 class PathVisualizerTest(unittest.TestCase):
-    def test_both_maps_export_all_routes(self):
+    def test_five_real_map_route_cases(self):
+        expected_cases = (
+            ("01_building_a", "building_a", "normal", "space_3", 620.97),
+            ("02_accessible", "any", "accessible", "space_5", 551.81),
+            ("03_exit", "exit", "normal", "space_3", 620.97),
+            ("04_building_b_accessible", "building_b", "accessible", "space_6", 362.69),
+            ("05_entrance_accessible", "entrance", "accessible", "space_6", 362.69),
+        )
         with tempfile.TemporaryDirectory() as folder:
-            for map_id in (DEFAULT_MAP_ID, TEST_MAP_ID):
+            for map_id in (DEFAULT_MAP_ID,):
                 with self.subTest(map_id=map_id):
                     config = get_map_config(map_id, output_root=folder)
                     graph, skeleton = graph_exporter.build_road_graph(config.image_path)
@@ -35,16 +42,21 @@ class PathVisualizerTest(unittest.TestCase):
                     road_mask = map_reader.detect_road_mask(image)
                     map_data, parking_graph = parking_selector.load_parking_map(config.semantic_path)
                     outputs = export_routes(config)
-                    self.assertEqual(len(outputs), 4)
-                    for preference, (png_path, json_path) in zip(
-                        parking_selector.PARKING_PREFERENCES, outputs, strict=True
+                    self.assertEqual(len(outputs), 5)
+                    for expected, (png_path, json_path) in zip(
+                        expected_cases, outputs, strict=True
                     ):
+                        case_id, preference, parking_type, space_id, distance = expected
                         result = parking_selector.select_parking_from_map(
-                            map_data, parking_graph, preference
+                            map_data, parking_graph, preference, parking_type=parking_type
                         )
                         data = json.loads(json_path.read_text(encoding="utf-8"))
                         self.assertEqual(data["map_id"], map_id)
                         self.assertEqual(data["preference"], preference)
+                        self.assertEqual(data["case_id"], case_id)
+                        self.assertEqual(data["parking_type"], parking_type)
+                        self.assertEqual(data["parking_space_id"], space_id)
+                        self.assertEqual(data["total_distance"], distance)
                         self.assertEqual(data["node_route"], result["route"])
                         self.assertEqual(data["total_distance"], result["route_distance"])
                         self.assertEqual(data["unit"], "pixel")
@@ -61,11 +73,21 @@ class PathVisualizerTest(unittest.TestCase):
                         self.assertTrue(all(road_mask[y, x] for x, y in points))
                         self.assertTrue(all(0 < dist(a, b) <= sqrt(2) for a, b in zip(points, points[1:])))
                         self.assertEqual(png_path.parent, config.output_dir / "routes")
+                        self.assertEqual(png_path.name, f"{case_id}.png")
+                        self.assertEqual(json_path.name, f"{case_id}.json")
                         preview = cv2.imread(str(png_path))
                         self.assertEqual(preview.shape, image.shape)
-                        # 출발·도착·교차점 마커 이외의 좌표는 PNG에서도 경로 색으로 칠해진다.
-                        painted = sum(tuple(preview[y, x]) == ROUTE_COLOR for x, y in points)
-                        self.assertGreater(painted, len(points) * 0.90)
+                        # 출발·도착·교차점 표식을 제외한 경로 픽셀과 JSON 좌표를 비교한다.
+                        markers = [
+                            (graph.nodes[node]["x"], graph.nodes[node]["y"])
+                            for node in result["route"]
+                        ]
+                        line_points = [
+                            point for point in points
+                            if all(dist(point, marker) > 12 for marker in markers)
+                        ]
+                        self.assertTrue(line_points)
+                        self.assertTrue(all(tuple(preview[y, x]) == ROUTE_COLOR for x, y in line_points))
 
     def test_cheapest_parallel_edge_reversed_and_joined(self):
         graph = nx.MultiGraph()

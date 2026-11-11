@@ -1,6 +1,7 @@
 {
   "map_id": "parking_map_real",
-  "preference": "exit",
+  "preference": "building_a",
+  "parking_type": "normal",
   "parking_space_id": "space_3",
   "start_node_id": "N7",
   "destination_node_id": "N1",
@@ -2491,5 +2492,6 @@
       887,
       129
     ]
-  ]
+  ],
+  "case_id": "01_building_a"
 }

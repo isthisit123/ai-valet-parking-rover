@@ -15,3 +15,6 @@ __pycache__/
 # 운영체제 파일
 .DS_Store
 Thumbs.db
+
+# 로컬 보관 자료
+/archives/

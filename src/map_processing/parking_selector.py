@@ -112,6 +112,9 @@ def select_parking_from_map(map_data, graph, preference, *, parking_type="normal
                 parking, building
             )
 
+        elif preference == "any":
+            score = 0.0
+
         else:
             raise ValueError(
                 f"Unknown preference: {preference}"
@@ -119,8 +122,14 @@ def select_parking_from_map(map_data, graph, preference, *, parking_type="normal
 
         candidates.append((score, parking_id))
 
-    # 점수가 가장 작은 주차칸 선택
-    best_score, best_parking = min(candidates)
+    # 조건이 없는 경우에는 고유 주차칸 ID로 결정해 재실행 결과를 일정하게 유지한다.
+    if preference == "any":
+        best_score, best_parking = min(
+            candidates,
+            key=lambda candidate: graph.nodes[candidate[1]].get("region_id", candidate[1]),
+        )
+    else:
+        best_score, best_parking = min(candidates)
 
     # 입구에서 선택된 주차칸까지 최단 경로 계산
     route_distance, route = nx.single_source_dijkstra(

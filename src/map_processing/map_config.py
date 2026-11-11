@@ -5,15 +5,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 MAPS_DIR = BASE_DIR / "assets" / "maps"
-DEFAULT_OUTPUT_ROOT = BASE_DIR / "data" / "graphs"
-DEFAULT_MAP_ID = "parking_map_v1"
+DEFAULT_OUTPUT_ROOT = BASE_DIR / "data" / "maps"
 TEST_MAP_ID = "parking_map_v1_test"
 REAL_MAP_ID = "parking_map_real"
-LABEL_FILENAMES = {
-    DEFAULT_MAP_ID: "parking_map_v1_labels.json",
-    TEST_MAP_ID: "parking_map_v1_labels_test.json",
-    REAL_MAP_ID: "parking_map_real_labels.json",
-}
+DEFAULT_MAP_ID = REAL_MAP_ID
 
 # HSV 범위는 하한과 상한 순서다. 시설 설정의 마지막 값은 최소 면적이다.
 ROAD_HSV_RANGES = (
@@ -53,11 +48,11 @@ class MapConfig:
 
     @property
     def graph_path(self):
-        return self.output_dir / f"{self.map_id}.json"
+        return self.output_dir / "graph.json"
 
     @property
     def semantic_path(self):
-        return self.output_dir / f"{self.map_id}_semantic.json"
+        return self.output_dir / "semantic.json"
 
     @property
     def preview_path(self):
@@ -68,19 +63,24 @@ class MapConfig:
         return self.output_dir / "road_skeleton.png"
 
 
-def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
-    if map_id not in LABEL_FILENAMES:
-        raise ValueError(f"등록되지 않은 지도 ID {map_id!r}입니다.")
+def available_map_ids():
+    # 이미지와 대응 라벨 파일을 갖춘 지도 ID를 자동으로 찾는다.
+    return sorted(
+        path.name.removesuffix("_labels.json")
+        for path in MAPS_DIR.glob("*_labels.json")
+        if (MAPS_DIR / f"{path.name.removesuffix('_labels.json')}.png").is_file()
+    )
 
-    # 원본은 기존 경로를 사용하고, 다른 지도는 자기 폴더에 결과를 저장한다.
-    output_dir = Path(output_root)
-    if map_id != DEFAULT_MAP_ID:
-        output_dir /= map_id
+
+def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
+    if map_id not in available_map_ids():
+        raise ValueError(f"지도 {map_id!r}의 PNG 이미지와 _labels.json 파일이 필요합니다.")
+
     return MapConfig(
         map_id=map_id,
         image_path=MAPS_DIR / f"{map_id}.png",
-        label_path=MAPS_DIR / LABEL_FILENAMES[map_id],
-        output_dir=output_dir,
+        label_path=MAPS_DIR / f"{map_id}_labels.json",
+        output_dir=Path(output_root) / map_id,
     )
 
 
@@ -90,13 +90,13 @@ DEFAULT_MAP = get_map_config()
 def create_map_parser(description, *, uses_output_dir=True):
     parser = ArgumentParser(description=description)
     parser.add_argument(
-        "--map-id", choices=LABEL_FILENAMES, default=DEFAULT_MAP_ID,
+        "--map-id", choices=available_map_ids(), default=DEFAULT_MAP_ID,
         help=f"처리할 지도 ID (기본값 {DEFAULT_MAP_ID})",
     )
     if uses_output_dir:
         parser.add_argument(
             "--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT,
-            help="지도 결과를 읽고 쓰는 기준 폴더 (기본값 data/graphs)",
+            help="지도 결과를 읽고 쓰는 기준 폴더 (기본값 data/maps)",
         )
     return parser
 

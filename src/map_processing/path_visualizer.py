@@ -8,6 +8,7 @@ from .map_config import create_map_parser, get_map_config
 from .map_reader import detect_road_mask, load_map_image
 from .parking_selector import (
     PARKING_PREFERENCES,
+    PARKING_TYPES,
     load_parking_map,
     select_parking_from_map,
 )
@@ -15,6 +16,15 @@ from .parking_selector import (
 
 ROUTE_COLOR = (255, 232, 68)
 OUTLINE_COLOR = (32, 28, 20)
+
+# 요청한 다섯 가지 경로 조합을 기본 실행에서 순서대로 생성한다.
+DEFAULT_ROUTE_CASES = (
+    ("01_building_a", "building_a", "normal"),
+    ("02_accessible", "any", "accessible"),
+    ("03_exit", "exit", "normal"),
+    ("04_building_b_accessible", "building_b", "accessible"),
+    ("05_entrance_accessible", "entrance", "accessible"),
+)
 
 
 def node_point(graph, node_id):
@@ -57,11 +67,11 @@ def connect_waypoints(graph, node_route, road_mask):
     return waypoints
 
 
-def build_route_data(map_id, map_data, graph, preference, road_mask):
+def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_type="normal"):
     if map_data["unit"] != "pixel":
         raise ValueError("지도 위 경로는 픽셀 단위의 도로 그래프가 필요합니다.")
 
-    result = select_parking_from_map(map_data, graph, preference)
+    result = select_parking_from_map(map_data, graph, preference, parking_type=parking_type)
     node_route = result["route"]
     destination = result["selected"]
     space_id = graph.nodes[destination].get("region_id")
@@ -71,6 +81,7 @@ def build_route_data(map_id, map_data, graph, preference, road_mask):
     return {
         "map_id": map_id,
         "preference": preference,
+        "parking_type": parking_type,
         "parking_space_id": space_id,
         "start_node_id": node_route[0],
         "destination_node_id": destination,
@@ -96,7 +107,7 @@ def draw_marker(image, point, label, color):
     label_x = x + 18
     if label_x + label_width > width - 12:
         label_x = max(8, x - label_width - 18)
-    label_y = y + label_height + 16 if y < height / 2 else y - 16
+    label_y = max(label_height + 6, min(y - 16, height - baseline - 6))
     cv2.rectangle(
         image,
         (label_x - 6, label_y - label_height - 5),
@@ -117,15 +128,24 @@ def draw_route(image, graph, route_data):
     for node_id in route_data["node_route"][1:-1]:
         cv2.circle(preview, node_point(graph, node_id), 4, OUTLINE_COLOR, -1, cv2.LINE_AA)
     draw_marker(preview, tuple(waypoints[0]), "START", (255, 255, 255))
-    goal_label = (
-        f"GOAL {route_data['parking_space_id']} | {route_data['preference']} | "
-        f"{route_data['total_distance']:.2f} px"
-    )
+    goal_label = f"GOAL {route_data['parking_space_id']}"
     draw_marker(preview, tuple(waypoints[-1]), goal_label, (45, 205, 255))
+    caption = (
+        f"{route_data.get('case_id', route_data['preference'])} | "
+        f"{route_data['parking_type']} | {route_data['total_distance']:.2f} px"
+    )
+    (text_width, text_height), baseline = cv2.getTextSize(
+        caption, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2
+    )
+    cv2.rectangle(preview, (8, 8), (text_width + 20, text_height + baseline + 20), OUTLINE_COLOR, -1)
+    cv2.putText(
+        preview, caption, (14, text_height + 12), cv2.FONT_HERSHEY_SIMPLEX,
+        0.65, (255, 255, 255), 2, cv2.LINE_AA,
+    )
     return preview
 
 
-def export_routes(config, preferences=PARKING_PREFERENCES):
+def export_routes(config, preferences=None, *, parking_type="normal"):
     map_data, graph = load_parking_map(config.semantic_path)
     if map_data.get("map_id", config.map_id) != config.map_id:
         raise ValueError(f"선택한 지도와 의미 지도 JSON의 map_id가 다릅니다. {config.map_id}")
@@ -134,12 +154,19 @@ def export_routes(config, preferences=PARKING_PREFERENCES):
     output_dir = config.output_dir / "routes"
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
-    for preference in preferences:
-        route_data = build_route_data(config.map_id, map_data, graph, preference, road_mask)
+    cases = DEFAULT_ROUTE_CASES
+    if preferences is not None:
+        cases = tuple(
+            (f"{preference}_{parking_type}", preference, parking_type) for preference in preferences
+        )
+    for case_id, preference, case_parking_type in cases:
+        route_data = build_route_data(
+            config.map_id, map_data, graph, preference, road_mask, parking_type=case_parking_type
+        )
+        route_data["case_id"] = case_id
         preview = draw_route(image, graph, route_data)
-        stem = f"{config.map_id}_route_{preference}"
-        png_path = output_dir / f"{stem}.png"
-        json_path = output_dir / f"{stem}.json"
+        png_path = output_dir / f"{case_id}.png"
+        json_path = output_dir / f"{case_id}.json"
         success, encoded = cv2.imencode(".png", preview)
         if not success:
             raise OSError(f"경로 미리보기 PNG를 인코딩하지 못했습니다. {png_path}")
@@ -152,10 +179,17 @@ def export_routes(config, preferences=PARKING_PREFERENCES):
 
 if __name__ == "__main__":
     parser = create_map_parser("최단 경로를 지도 PNG와 픽셀 waypoint JSON으로 저장합니다.")
-    parser.add_argument("--preference", choices=PARKING_PREFERENCES, help="생략하면 네 조건을 모두 저장")
+    parser.add_argument(
+        "--preference", choices=PARKING_PREFERENCES + ("any",), help="생략하면 기본 다섯 조합을 저장"
+    )
+    parser.add_argument("--parking-type", choices=PARKING_TYPES, help="단일 조건의 주차칸 유형")
     args = parser.parse_args()
+    if args.parking_type and not args.preference:
+        parser.error("--parking-type은 --preference와 함께 지정하세요.")
     config = get_map_config(args.map_id, output_root=args.output_dir)
-    preferences = (args.preference,) if args.preference else PARKING_PREFERENCES
-    for png_path, json_path in export_routes(config, preferences):
+    preferences = (args.preference,) if args.preference else None
+    for png_path, json_path in export_routes(
+        config, preferences, parking_type=args.parking_type or "normal"
+    ):
         print(f"PNG  {png_path}")
         print(f"JSON {json_path}")

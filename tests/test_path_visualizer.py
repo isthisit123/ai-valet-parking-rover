@@ -17,11 +17,11 @@ from src.map_processing.path_visualizer import ROUTE_COLOR, connect_waypoints, e
 class PathVisualizerTest(unittest.TestCase):
     def test_five_real_map_route_cases(self):
         expected_cases = (
-            ("01_building_a", "building_a", "normal", "space_3", 620.97),
-            ("02_accessible", "any", "accessible", "space_5", 551.81),
-            ("03_exit", "exit", "normal", "space_3", 620.97),
-            ("04_building_b_accessible", "building_b", "accessible", "space_6", 362.69),
-            ("05_entrance_accessible", "entrance", "accessible", "space_6", 362.69),
+            ("01_building_a", "building_a", "normal", "space_3", 687.20),
+            ("02_accessible", "any", "accessible", "space_5", 558.91),
+            ("03_exit", "exit", "normal", "space_3", 687.20),
+            ("04_building_b_accessible", "building_b", "accessible", "space_6", 294.50),
+            ("05_entrance_accessible", "entrance", "accessible", "space_6", 294.50),
         )
         with tempfile.TemporaryDirectory() as folder:
             for map_id in (DEFAULT_MAP_ID,):

@@ -3,29 +3,29 @@
   "buildings": [
     {
       "id": "building_a",
-      "hint": [590, 57]
+      "hint": [914, 307]
     },
     {
       "id": "building_b",
-      "hint": [1060, 630]
+      "hint": [197, 555]
     }
   ],
   "gates": [
     {
       "id": "entrance",
-      "hint": [805, 677]
+      "hint": [206, 415]
     },
     {
       "id": "exit",
-      "hint": [775, 34]
+      "hint": [984, 423]
     }
   ],
   "parking_spaces": [
-    {"id": "space_1", "type": "normal", "hint": [548, 522]},
-    {"id": "space_2", "type": "normal", "hint": [566, 329]},
-    {"id": "space_3", "type": "normal", "hint": [979, 132]},
-    {"id": "space_4", "type": "normal", "hint": [1001, 271]},
-    {"id": "space_5", "type": "accessible", "hint": [580, 188]},
-    {"id": "space_6", "type": "accessible", "hint": [1028, 432]}
+    {"id": "space_1", "type": "normal", "hint": [382, 302]},
+    {"id": "space_2", "type": "normal", "hint": [560, 303]},
+    {"id": "space_3", "type": "normal", "hint": [888, 566]},
+    {"id": "space_4", "type": "normal", "hint": [628, 564]},
+    {"id": "space_5", "type": "accessible", "hint": [733, 304]},
+    {"id": "space_6", "type": "accessible", "hint": [423, 556]}
   ]
 }

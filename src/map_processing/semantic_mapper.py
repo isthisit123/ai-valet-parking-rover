@@ -18,10 +18,12 @@ from .map_config import (
     REGION_MAX_IMAGE_RATIO,
     REGION_MIN_FILL_RATIO,
     REGION_MIN_SIDE,
+    create_map_parser,
+    get_map_config,
     normal_region_for_map,
-    parse_map_config,
 )
 from .map_reader import load_map_image
+from .planar_calibration import load_world_to_image, project_points
 
 
 def extract_regions(mask, min_area, image_shape, *, allow_border=False):
@@ -135,6 +137,49 @@ def is_pixel_hint(hint):
         and len(hint) == 2
         and all(type(value) in (int, float) for value in hint)
     )
+
+
+def resolve_cm_hints(label_data, image_size, calibration_path):
+    resolved = label_data.copy()
+    cm_specs = []
+    for group in ("buildings", "gates", "parking_spaces"):
+        specs = label_data.get(group)
+        if not isinstance(specs, list):
+            continue
+        resolved[group] = specs.copy()
+        for index, spec in enumerate(specs):
+            if not isinstance(spec, dict) or "hint_cm" not in spec:
+                continue
+            if "hint" in spec:
+                raise ValueError(f"{spec.get('id')!r}의 hint와 hint_cm 중 하나만 지정하세요.")
+            copy = spec.copy()
+            resolved[group][index] = copy
+            cm_specs.append(copy)
+
+    if not cm_specs:
+        return label_data
+    if calibration_path is None:
+        raise ValueError("hint_cm을 사용하려면 --calibration으로 Homography JSON을 지정하세요.")
+    matrix, paper_size = load_world_to_image(
+        calibration_path, map_id=label_data.get("map_id"), image_size=image_size
+    )
+
+    # 실제 위치를 지도 픽셀로 역변환하고, 기존 영역 매칭에는 픽셀 힌트를 넘긴다.
+    for spec in cm_specs:
+        hint_cm = spec.pop("hint_cm")
+        if not is_pixel_hint(hint_cm) or not np.isfinite(hint_cm).all():
+            raise ValueError(f"{spec.get('id')!r}의 hint_cm은 유효한 [x, y] 좌표여야 합니다.")
+        point = np.asarray(hint_cm, dtype=float)
+        if (point < 0).any() or (point > paper_size).any():
+            raise ValueError(f"{spec.get('id')!r}의 hint_cm이 전지 범위를 벗어났습니다.")
+        denominator = matrix[2, :2] @ point + matrix[2, 2]
+        if not np.isfinite(denominator) or np.isclose(denominator, 0):
+            raise ValueError(f"{spec.get('id')!r}의 hint_cm을 지도 픽셀로 변환할 수 없습니다.")
+        pixel = project_points([point], matrix)[0]
+        if not np.isfinite(pixel).all() or (pixel < 0).any() or (pixel >= image_size).any():
+            raise ValueError(f"{spec.get('id')!r}의 hint_cm을 변환한 위치가 지도 이미지를 벗어났습니다.")
+        spec["hint"] = pixel.tolist()
+    return resolved
 
 
 def matching_region_indices(regions, hint):
@@ -346,12 +391,15 @@ def create_semantic_map(
     label_path=DEFAULT_MAP.label_path,
     output_path=DEFAULT_MAP.semantic_path,
     expected_map_id=None,
+    calibration_path=None,
 ):
     image = load_map_image(image_path)
     with open(graph_path, "r", encoding="utf-8") as f:
         graph_data = json.load(f)
-    with open(label_path, "r", encoding="utf-8") as f:
+    with open(label_path, "r", encoding="utf-8-sig") as f:
         label_data = json.load(f)
+    height, width = image.shape[:2]
+    label_data = resolve_cm_hints(label_data, (width, height), calibration_path)
 
     map_id = label_data.get("map_id")
     detected = detect_regions(image, map_id=map_id)
@@ -393,11 +441,18 @@ def create_semantic_map(
 
 
 if __name__ == "__main__":
-    config = parse_map_config("도로 그래프에 주차칸과 시설 정보를 연결합니다.")
-    create_semantic_map(
-        image_path=config.image_path,
-        graph_path=config.graph_path,
-        label_path=config.label_path,
-        output_path=config.semantic_path,
-        expected_map_id=config.map_id,
-    )
+    parser = create_map_parser("도로 그래프에 주차칸과 시설 정보를 연결합니다.")
+    parser.add_argument("--calibration", type=Path, help="hint_cm에 사용할 Homography JSON")
+    args = parser.parse_args()
+    config = get_map_config(args.map_id, output_root=args.output_dir)
+    try:
+        create_semantic_map(
+            image_path=config.image_path,
+            graph_path=config.graph_path,
+            label_path=config.label_path,
+            output_path=config.semantic_path,
+            expected_map_id=config.map_id,
+            calibration_path=args.calibration,
+        )
+    except (OSError, ValueError) as error:
+        parser.error(str(error))

@@ -23,18 +23,76 @@ from src.map_processing.map_config import REAL_MAP_ID, get_map_config
 
 MAP_CASES = {
     REAL_MAP_ID: {
-        "nodes": ("N6", "N4", "N1", "N3", "N2", "N5"),
+        "nodes": ("N0", "N1", "N7", "N6", "N2", "N5"),
         "routes": {
-            "exit": (178.63, "N7 N13 N12 N11 N10 N9 N8 N1", 620.97),
-            "entrance": (237.24, "N7 N13 N6", 237.24),
-            "building_a": (209.62, "N7 N13 N12 N11 N10 N9 N8 N1", 620.97),
-            "building_b": (269.60, "N7 N13 N6", 237.24),
+            "exit": (172.68, "N3 N8 N10 N9 N12 N11 N13 N7", 687.20),
+            "entrance": (185.61, "N3 N8 N0", 185.61),
+            "building_a": (135.00, "N3 N8 N10 N9 N12 N11 N13 N7", 687.20),
+            "building_b": (149.38, "N3 N8 N0", 185.61),
         },
     },
 }
 
 
 class ParkingIdsTest(unittest.TestCase):
+    def test_centimeter_hints_match_the_same_facilities_as_pixel_hints(self):
+        output_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        config = get_map_config(output_root=output_root)
+        graph, skeleton = graph_exporter.build_road_graph(config.image_path)
+        graph_exporter.save_graph(graph, skeleton, config=config)
+        image = map_reader.load_map_image(config.image_path)
+        height, width = image.shape[:2]
+        matrix = np.array([[0.12, 0.02, -20], [0.01, 0.13, -18], [0.0003, -0.0001, 1]])
+        report = {
+            "map_id": config.map_id,
+            "source_frame": {"coordinate_frame": "camera_image", "size_px": [width, height]},
+            "target_frame": {
+                "coordinate_frame": "world", "unit": "cm", "origin": "paper_top_left",
+                "axis_directions": {"x": "right", "y": "down"},
+            },
+            "paper_size_cm": [200, 200],
+            "image_to_world": matrix.tolist(),
+            "validation": {"passed": True},
+        }
+        calibration_path = output_root / "homography.json"
+        calibration_path.write_text(json.dumps(report), encoding="utf-8")
+
+        labels = json.loads(config.label_path.read_text(encoding="utf-8-sig"))
+        for group in ("buildings", "gates", "parking_spaces"):
+            for spec in labels[group]:
+                if spec["id"] == "exit":
+                    continue  # 픽셀과 cm 힌트를 한 파일에 섞어도 된다.
+                x, y, scale = matrix @ [*spec.pop("hint"), 1]
+                spec["hint_cm"] = [x / scale, y / scale]
+        cm_label_path = output_root / "labels_cm.json"
+        cm_label_path.write_text(json.dumps(labels), encoding="utf-8-sig")
+        paths = {
+            "image_path": config.image_path,
+            "graph_path": config.graph_path,
+            "output_path": config.semantic_path,
+            "expected_map_id": config.map_id,
+        }
+        with redirect_stdout(io.StringIO()):
+            expected = semantic_mapper.create_semantic_map(**paths, label_path=config.label_path)
+            actual = semantic_mapper.create_semantic_map(
+                **paths, label_path=cm_label_path, calibration_path=calibration_path,
+            )
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["unit"], "pixel")
+        self.assertEqual(json.loads(cm_label_path.read_text(encoding="utf-8-sig")), labels)
+
+        with self.assertRaisesRegex(ValueError, "--calibration"):
+            semantic_mapper.resolve_cm_hints(labels, (width, height), None)
+        for overrides, error in (
+            ({"map_id": "another_map"}, "map_id"),
+            ({"source_frame": {"size_px": [width + 1, height]}}, "해상도"),
+            ({"validation": {"passed": False}}, "검증을 통과"),
+        ):
+            with self.subTest(overrides=overrides):
+                calibration_path.write_text(json.dumps({**report, **overrides}), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, error):
+                    semantic_mapper.resolve_cm_hints(labels, (width, height), calibration_path)
+
     def test_new_map_pair_is_discovered_without_code_registration(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -68,10 +126,10 @@ class ParkingIdsTest(unittest.TestCase):
             )
         map_data, graph = parking_selector.load_parking_map(config.semantic_path)
         expected = {
-            "exit": ("space_5", "N7 N13 N12 N11 N10 N9 N2", 551.81),
-            "entrance": ("space_6", "N7 N13 N12 N5", 362.69),
-            "building_a": ("space_5", "N7 N13 N12 N11 N10 N9 N2", 551.81),
-            "building_b": ("space_6", "N7 N13 N12 N5", 362.69),
+            "exit": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 558.91),
+            "entrance": ("space_6", "N3 N8 N10 N5", 294.50),
+            "building_a": ("space_5", "N3 N8 N10 N9 N12 N11 N2", 558.91),
+            "building_b": ("space_6", "N3 N8 N10 N5", 294.50),
         }
         for preference, (space_id, route, distance) in expected.items():
             with self.subTest(preference=preference):
@@ -185,12 +243,16 @@ class ParkingIdsTest(unittest.TestCase):
                 normal, accessible, buildings, gates = semantic_mapper.detect_regions(
                     map_reader.load_map_image(config.image_path), map_id=map_id
                 )
-                self.assertEqual(tuple(map(len, (normal, accessible, buildings, gates))), (4, 2, 4, 0))
+                self.assertEqual(tuple(map(len, (normal, accessible, gates))), (4, 2, 0))
                 spaces = {
                     region["id"]: region for region in original["regions"]
                     if region["role"] in ("parking_normal", "parking_accessible")
                 }
                 self.assertEqual(len(spaces), 6)
+                self.assertEqual(
+                    {region["id"] for region in original["regions"] if region["id"] not in spaces},
+                    {"building_a", "building_b", "entrance", "exit"},
+                )
                 nodes = {node["id"]: node for node in original["nodes"]}
                 labels = json.loads(config.label_path.read_text(encoding="utf-8"))
                 regions_by_type = {"normal": normal, "accessible": accessible}

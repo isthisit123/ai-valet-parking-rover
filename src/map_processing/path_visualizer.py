@@ -95,7 +95,7 @@ def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_
     }
 
 
-def draw_marker(image, point, label, color):
+def draw_marker(image, point, label, color, route_points):
     cv2.circle(image, point, 10, OUTLINE_COLOR, -1, cv2.LINE_AA)
     cv2.circle(image, point, 7, color, -1, cv2.LINE_AA)
 
@@ -108,10 +108,24 @@ def draw_marker(image, point, label, color):
     if label_x + label_width > width - 12:
         label_x = max(8, x - label_width - 18)
     label_y = max(label_height + 6, min(y - 16, height - baseline - 6))
+    label_left = label_x - 6
+    label_right = label_x + label_width + 6
+    route_x, route_y = route_points.T
+    nearby_y = route_y[(route_x >= label_left - 5) & (route_x <= label_right + 5)]
+    # 라벨이 경로를 가리면 점 아래쪽에도 놓아 본다.
+    for candidate_y in (label_y, y + label_height + 16):
+        if candidate_y + baseline + 3 >= height:
+            continue
+        overlaps = (nearby_y >= candidate_y - label_height - 10) & (
+            nearby_y <= candidate_y + baseline + 8
+        )
+        if not np.any(overlaps):
+            label_y = candidate_y
+            break
     cv2.rectangle(
         image,
-        (label_x - 6, label_y - label_height - 5),
-        (label_x + label_width + 6, label_y + baseline + 3),
+        (label_left, label_y - label_height - 5),
+        (label_right, label_y + baseline + 3),
         OUTLINE_COLOR, -1,
     )
     cv2.putText(
@@ -127,9 +141,9 @@ def draw_route(image, graph, route_data):
     cv2.polylines(preview, [points], False, ROUTE_COLOR, 5, cv2.LINE_AA)
     for node_id in route_data["node_route"][1:-1]:
         cv2.circle(preview, node_point(graph, node_id), 4, OUTLINE_COLOR, -1, cv2.LINE_AA)
-    draw_marker(preview, tuple(waypoints[0]), "START", (255, 255, 255))
+    draw_marker(preview, tuple(waypoints[0]), "START", (255, 255, 255), points)
     goal_label = f"GOAL {route_data['parking_space_id']}"
-    draw_marker(preview, tuple(waypoints[-1]), goal_label, (45, 205, 255))
+    draw_marker(preview, tuple(waypoints[-1]), goal_label, (45, 205, 255), points)
     caption = (
         f"{route_data.get('case_id', route_data['preference'])} | "
         f"{route_data['parking_type']} | {route_data['total_distance']:.2f} px"

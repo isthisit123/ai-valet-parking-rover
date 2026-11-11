@@ -194,9 +194,13 @@ python -m src.map_processing.graph_builder
 
 건물 A/B 및 입구/출구의 이름은 `assets/maps/<map_id>_labels.json`에서 `id`와 `hint`를 지정해 매칭합니다. `hint`는 **이미지 좌상단 원점의 `[x, y]` 픽셀 좌표**로, 시설을 구별하기 위한 위치 힌트입니다.
 
+줄자로 잰 위치는 건물·출입구·주차칸의 `hint` 대신 `"hint_cm": [30.0, 40.0]`처럼 넣을 수 있습니다. 전지 왼쪽 위를 원점으로 오른쪽이 +x, 아래쪽이 +y입니다. 항목마다 `hint`와 `hint_cm` 중 하나를 지정하고, cm 힌트가 있으면 `python -m src.map_processing.semantic_mapper --calibration <homography.json>`을 실행합니다. 지도 이미지는 보정할 때와 같은 카메라 위치, 해상도, 크롭을 사용해야 합니다. 내부에서 cm 힌트를 픽셀로 바꿔 검출 영역과 매칭하며, 생성되는 의미 지도와 경로의 단위는 픽셀입니다.
+
 실물 지도는 `assets/maps/parking_map_real.png`와 `parking_map_real_labels.json`을 사용합니다. 라벨의 `buildings`와 `gates`에 각 검은색 사각형 안쪽의 힌트 좌표를 하나씩 지정합니다. 검은색 사각형은 서로 떨어져 있어야 하며, 각 힌트는 서로 다른 검출 영역에 연결되어야 합니다. 실물 사진의 파란색 주차칸에는 별도 밝기 하한을 적용하고, 검은색 시설 후보는 얇게 이어진 픽셀을 제거한 뒤 이미지 경계에서도 검출합니다.
 
 현재 데이터 단위는 **`pixel`**입니다. 지도상의 `weight`도 도로 중심선을 따른 픽셀 거리이므로 **실제 cm/m 거리로 해석하면 안 됩니다.** 실물 제작 후 카메라 캘리브레이션·월드 좌표계 정의·Homography를 적용하고, 변환된 좌표에서 간선 길이를 다시 계산할 예정입니다.
+
+바닥 평면의 Homography를 구하려면 `python -m src.map_processing.planar_calibration --image <사진> --points <기준점.json> --output <결과.json> --max-error-cm <허용오차>`를 실행합니다. 기준점 JSON에는 `map_id`, `paper_size_cm`의 [가로, 세로], `control_points`의 십자 4개(`id`, `pixel`, `world_cm`), `paper_corners_px`의 전지 모서리 4개를 넣습니다. 점 순서는 좌상단부터 시계 방향이고, 월드 원점은 전지 왼쪽 위입니다. 여덟 점으로 변환을 구하고, 한 점씩 제외해서 해당 점의 오차를 검사합니다. 검사에 실패하면 종료 코드는 1이며 결과 JSON에는 후보 행렬과 오차가 기록됩니다.
 
 ### 다른 지도 테스트
 
@@ -213,7 +217,7 @@ python -m src.map_processing.graph_builder
 | 그래프 연결 | `True` |
 | 일반/장애인 주차칸 | 4 / 2 |
 | 건물/입출구 영역 | 2 / 2 |
-| 입구 노드 / 출구 노드 | `N7` / `N0` |
+| 입구 노드 / 출구 노드 | `N3` / `N4` |
 | 경로 PNG / JSON | 5 / 5 |
 
 실행 결과 예시(실물 지도, 건물 B와 가까운 장애인석):
@@ -221,9 +225,9 @@ python -m src.map_processing.graph_builder
 ```text
 Preference: building_b
 Selected: N5
-Score: 123.26
-Route: N7 -> N13 -> N12 -> N5
-Route distance: 362.69
+Score: 140.00
+Route: N3 -> N8 -> N10 -> N5
+Route distance: 294.50
 ```
 
 다섯 케이스의 선택 주차칸과 경로를 테스트하고, waypoint가 도로 영역 안에 있으며 인접 점 사이가 최대 대각선 1픽셀 간격인지 확인합니다. 테스트는 `archives/` 자료에 의존하지 않습니다.

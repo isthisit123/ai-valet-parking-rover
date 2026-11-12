@@ -1,0 +1,7 @@
+{
+  "map_id": "parking_map_real",
+  "image_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd",
+  "paper_size_cm": [109.5, 79],
+  "paper_corners_px": [[308, 153], [1028, 184], [1205, 579], [210, 547]],
+  "control_points": []
+}

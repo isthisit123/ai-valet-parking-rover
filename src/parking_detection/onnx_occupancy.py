@@ -8,6 +8,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from src.map_processing.map_config import DEFAULT_MAP
+from src.map_processing.map_identity import map_identity, require_map_identity
 from src.map_processing.parking_selector import load_parking_map
 
 
@@ -50,8 +52,9 @@ class CarDetector:
 
 
 def validate_regions(config, map_data, image):
-    if config.get("map_id") != map_data["map_id"]:
-        raise ValueError("카메라 ROI와 의미 지도의 map_id가 다릅니다.")
+    if not isinstance(config, dict):
+        raise ValueError("카메라 ROI 설정은 JSON 객체여야 합니다.")
+    require_map_identity(map_data, config, "카메라 ROI")
     height, width = image.shape[:2]
     if config.get("coordinate_frame") != "camera_image" or config.get("image_size_px") != [width, height]:
         raise ValueError("카메라 ROI 좌표계 또는 해상도가 현재 영상과 다릅니다.")
@@ -120,7 +123,7 @@ def build_snapshot(map_data, image, detections, observed_at, *, regions=None, em
                     state["evidence"] = "verified_empty_reference_similarity"
         spaces.append(state)
     return {
-        "schema_version": "0.1-draft", "map_id": map_data["map_id"],
+        "schema_version": "0.1-draft", **map_identity(map_data),
         "observed_at": observed_at, "coordinate_frame": "camera_image",
         "image_size_px": [image.shape[1], image.shape[0]], "spaces": spaces,
     }
@@ -138,7 +141,7 @@ def main():
     parser.add_argument("--preview", type=Path)
     parser.add_argument("--save-frame", type=Path, help="ROI 설정/빈 배경 확인용 원본 프레임 PNG 저장")
     args = parser.parse_args()
-    map_data, _ = load_parking_map()
+    map_data, _ = load_parking_map(config=DEFAULT_MAP)
     regions = json.loads(args.regions.read_text(encoding="utf-8-sig")) if args.regions else None
     reference = read_image(args.empty_reference) if args.empty_reference else None
     # 카메라를 열기 전에 모델 로드 실패를 드러낸다.

@@ -6,6 +6,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .map_identity import AXES, WORLD_ORIGIN
+
 
 def quadrilateral(points, name):
     values = np.asarray(points, dtype=np.float32)
@@ -21,7 +23,7 @@ def project_points(points, matrix):
     return cv2.perspectiveTransform(values.reshape(-1, 1, 2), matrix).reshape(-1, 2)
 
 
-def load_world_to_image(path, *, map_id, image_size):
+def load_world_to_image(path, *, map_id, image_size, image_sha256=None):
     report = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     if report.get("map_id") != map_id:
         raise ValueError(f"지도 {map_id!r}와 Homography의 map_id가 다릅니다.")
@@ -29,12 +31,14 @@ def load_world_to_image(path, *, map_id, image_size):
         raise ValueError("검증을 통과한 Homography JSON이 필요합니다.")
     if report.get("source_frame", {}).get("size_px") != list(image_size):
         raise ValueError("Homography 사진과 현재 지도 이미지의 해상도가 다릅니다.")
+    if image_sha256 is not None and report["source_frame"].get("sha256") != image_sha256:
+        raise ValueError("보정에 사용한 사진과 현재 지도 이미지가 다릅니다.")
     target_frame = report.get("target_frame", {})
     if (
         target_frame.get("coordinate_frame") != "world"
         or target_frame.get("unit") != "cm"
-        or target_frame.get("origin") != "paper_top_left"
-        or target_frame.get("axis_directions") != {"x": "right", "y": "down"}
+        or target_frame.get("origin") != WORLD_ORIGIN
+        or target_frame.get("axis_directions") != AXES
     ):
         raise ValueError("전지 왼쪽 위 원점, x 오른쪽, y 아래 방향의 cm 좌표가 필요합니다.")
     paper_size = np.asarray(report.get("paper_size_cm"), dtype=float)
@@ -107,8 +111,8 @@ def calibrate_floor(spec, image_size, *, max_error_cm):
         "target_frame": {
             "coordinate_frame": "world",
             "unit": "cm",
-            "origin": "paper_top_left",
-            "axis_directions": {"x": "right", "y": "down"},
+            "origin": WORLD_ORIGIN,
+            "axis_directions": AXES,
         },
         "lens_distortion_corrected": False,
         "paper_size_cm": spec["paper_size_cm"],

@@ -1,20 +1,26 @@
 import json
 import math
+from pathlib import Path
 
 import networkx as nx
 
 from .map_config import DEFAULT_MAP, create_map_parser, get_map_config
-from .occupancy import load_occupancy, occupancy_states
+from .map_identity import configured_map_identity, require_map_identity
+from .occupancy import DEFAULT_OCCUPANCY_TTL, load_occupancy, occupancy_states
 
 
 PARKING_PREFERENCES = ("exit", "entrance", "building_a", "building_b")
 PARKING_TYPES = ("normal", "accessible")
 
 
-def load_parking_map(map_path=DEFAULT_MAP.semantic_path):
+def load_parking_map(map_path=DEFAULT_MAP.semantic_path, *, config=None):
     # 의미 정보가 포함된 지도 불러오기
     with open(map_path, "r", encoding="utf-8") as f:
         map_data = json.load(f)
+    if config is None and Path(map_path).resolve() == DEFAULT_MAP.semantic_path:
+        config = DEFAULT_MAP
+    if config is not None:
+        require_map_identity(configured_map_identity(config), map_data, "의미 지도")
 
     # NetworkX 그래프 생성
     graph = nx.MultiGraph()
@@ -64,7 +70,7 @@ def distance_to_building(node, building):
 
 
 def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path, parking_type="normal",
-                   occupancy=None, max_age_seconds=5.0, now=None):
+                   occupancy=None, max_age_seconds=DEFAULT_OCCUPANCY_TTL, now=None):
     map_data, graph = load_parking_map(map_path)
     return select_parking_from_map(
         map_data, graph, preference, parking_type=parking_type,
@@ -73,7 +79,7 @@ def select_parking(preference, *, map_path=DEFAULT_MAP.semantic_path, parking_ty
 
 
 def select_parking_from_map(map_data, graph, preference, *, parking_type="normal",
-                            occupancy=None, max_age_seconds=5.0, now=None):
+                            occupancy=None, max_age_seconds=DEFAULT_OCCUPANCY_TTL, now=None):
     # 입구 노드 확인
     entrance = get_node_by_role(map_data, "entrance")
     start_id = entrance["id"]
@@ -171,10 +177,10 @@ if __name__ == "__main__":
         help="선택할 주차칸 유형 (기본값 normal)",
     )
     parser.add_argument("--occupancy", help="주차칸 ID 기반 점유 JSON 경로")
-    parser.add_argument("--occupancy-ttl", type=float, default=5.0, help="점유 유효 시간(초)")
+    parser.add_argument("--occupancy-ttl", type=float, default=DEFAULT_OCCUPANCY_TTL, help="점유 유효 시간(초)")
     args = parser.parse_args()
     config = get_map_config(args.map_id, output_root=args.output_dir)
-    map_data, graph = load_parking_map(config.semantic_path)
+    map_data, graph = load_parking_map(config.semantic_path, config=config)
     occupancy = load_occupancy(args.occupancy) if args.occupancy else None
     if occupancy is None:
         print("정적 지도 시뮬레이션: 실제 빈자리 여부는 확인하지 않습니다.")

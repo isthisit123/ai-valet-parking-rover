@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from src.map_processing.map_identity import map_identity
 from src.map_processing.occupancy import occupancy_states
 from src.parking_detection.onnx_occupancy import CarDetector, build_snapshot
 
@@ -9,12 +10,13 @@ from src.parking_detection.onnx_occupancy import CarDetector, build_snapshot
 class OnnxOccupancyTest(unittest.TestCase):
     def setUp(self):
         self.image = np.full((100, 200, 3), 120, np.uint8)
-        self.map_data = {"map_id": "test", "nodes": [
+        self.map_data = {"map_id": "test", "id_assignment_revision": "test-v1",
+                         "map_image_sha256": "a" * 64, "nodes": [
             {"region_id": "space_1", "role": "parking_normal"},
             {"region_id": "space_2", "role": "parking_accessible"},
         ]}
         self.regions = {
-            "map_id": "test", "coordinate_frame": "camera_image",
+            **map_identity(self.map_data), "coordinate_frame": "camera_image",
             "image_size_px": [200, 100], "empty_reference_verified": True,
             "spaces": [{"parking_space_id": "space_1",
                         "polygon_px": [[10, 10], [90, 10], [90, 90], [10, 90]]}],
@@ -36,6 +38,7 @@ class OnnxOccupancyTest(unittest.TestCase):
     def test_free_requires_verified_background_match(self):
         snapshot = self.snapshot(empty_reference=self.image)
         self.assertEqual(snapshot["spaces"][0]["status"], "free")
+        self.assertEqual(map_identity(snapshot), map_identity(self.map_data))
         from datetime import datetime, timezone
         states = occupancy_states(self.map_data, snapshot, now=datetime(2026, 11, 11, 12, tzinfo=timezone.utc))
         self.assertEqual(states, {"space_1": "free", "space_2": "unknown"})
@@ -46,7 +49,8 @@ class OnnxOccupancyTest(unittest.TestCase):
             self.snapshot(empty_reference=self.image)
 
     def test_reject_wrong_map_resolution_and_duplicate_regions(self):
-        for key, value in (("map_id", "other"), ("image_size_px", [100, 200])):
+        for key, value in (("map_id", "other"), ("image_size_px", [100, 200]),
+                           ("id_assignment_revision", "old"), ("map_image_sha256", "b" * 64)):
             original = self.regions[key]
             self.regions[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):

@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+from hashlib import sha256
 from contextlib import redirect_stdout
 from math import dist
 from pathlib import Path
@@ -45,7 +46,10 @@ class ParkingIdsTest(unittest.TestCase):
         matrix = np.array([[0.12, 0.02, -20], [0.01, 0.13, -18], [0.0003, -0.0001, 1]])
         report = {
             "map_id": config.map_id,
-            "source_frame": {"coordinate_frame": "camera_image", "size_px": [width, height]},
+            "source_frame": {
+                "coordinate_frame": "camera_image", "size_px": [width, height],
+                "sha256": sha256(config.image_path.read_bytes()).hexdigest(),
+            },
             "target_frame": {
                 "coordinate_frame": "world", "unit": "cm", "origin": "paper_top_left",
                 "axis_directions": {"x": "right", "y": "down"},

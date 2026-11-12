@@ -1,5 +1,6 @@
 import json
 import math
+from hashlib import sha256
 from pathlib import Path
 
 import cv2
@@ -10,6 +11,7 @@ from .map_config import (
     BUILDING_REGION,
     DEFAULT_MAP,
     GATE_REGION,
+    OCR_LABEL_SCHEME,
     REAL_ACCESSIBLE_REGION,
     REAL_DARK_MIN_FILL_RATIO,
     REAL_DARK_OPEN_KERNEL_SIZE,
@@ -25,6 +27,7 @@ from .map_config import (
 )
 from .map_reader import load_map_image
 from .planar_calibration import load_world_to_image, project_points
+from .map_identity import require_map_identity
 
 
 def extract_regions(mask, min_area, image_shape, *, allow_border=False,
@@ -74,15 +77,15 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False,
     return regions
 
 
-def detect_regions(image, *, map_id=DEFAULT_MAP.map_id):
+def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
-    is_real_map = map_id == REAL_MAP_ID
+    is_real_map = real_profile or map_id == REAL_MAP_ID
     accessible_region = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
     region_settings = (
-        (normal_region_for_map(map_id), False),
+        (normal_region_for_map(REAL_MAP_ID if is_real_map else map_id), False),
         (accessible_region, False),
         (BUILDING_REGION, is_real_map),
         (GATE_REGION, False),
@@ -144,7 +147,7 @@ def is_pixel_hint(hint):
     )
 
 
-def resolve_cm_hints(label_data, image_size, calibration_path):
+def resolve_cm_hints(label_data, image_size, calibration_path, *, image_sha256=None):
     resolved = label_data.copy()
     cm_specs = []
     for group in ("buildings", "gates", "parking_spaces"):
@@ -166,7 +169,8 @@ def resolve_cm_hints(label_data, image_size, calibration_path):
     if calibration_path is None:
         raise ValueError("hint_cm을 사용하려면 --calibration으로 Homography JSON을 지정하세요.")
     matrix, paper_size = load_world_to_image(
-        calibration_path, map_id=label_data.get("map_id"), image_size=image_size
+        calibration_path, map_id=label_data.get("map_id"), image_size=image_size,
+        image_sha256=image_sha256,
     )
 
     # 실제 위치를 지도 픽셀로 역변환하고, 기존 영역 매칭에는 픽셀 힌트를 넘긴다.
@@ -349,12 +353,34 @@ def assign_regions_to_nodes(nodes, regions):
         raise ValueError("일부 주차칸 또는 출입구를 도로 끝점에 연결하지 못했습니다.")
 
 
+def uses_real_map_profile(label_data):
+    # OCR 이름표 지도는 새 지도 ID에서도 실물 지도의 검은 건물·출입구 규칙을 사용한다.
+    return label_data.get("map_id") == REAL_MAP_ID or label_data.get("label_scheme") == OCR_LABEL_SCHEME
+
+
+def mask_paper_background(image, paper_corners_px):
+    corners = np.asarray(paper_corners_px, dtype=np.float32)
+    height, width = image.shape[:2]
+    if (corners.shape != (4, 2) or not np.isfinite(corners).all()
+            or (corners < 0).any() or (corners >= (width, height)).any()
+            or not cv2.isContourConvex(corners)):
+        raise ValueError("종이 모서리의 픽셀 좌표 네 개를 둘레 순서로 입력하세요.")
+    paper = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(paper, np.rint(corners).astype(np.int32), 1)
+    # 지도와 OCR 좌표가 일치하도록 크롭하거나 리사이즈하지 않는다.
+    masked = image.copy()
+    masked[paper == 0] = 255
+    return masked
+
+
 def map_semantics(graph_data, label_data, detected_regions, *, expected_map_id=None):
     map_id = label_data.get("map_id")
     if not isinstance(map_id, str) or not map_id.strip():
         raise ValueError("지도 라벨에 비어 있지 않은 map_id가 필요합니다.")
     if expected_map_id is not None and map_id != expected_map_id:
         raise ValueError(f"선택한 지도 {expected_map_id!r}와 라벨의 map_id {map_id!r}가 다릅니다.")
+    if "map_id" in graph_data:
+        require_map_identity({"map_id": map_id}, graph_data, "도로 그래프")
 
     normal, accessible, buildings, gates = detected_regions
     parking_regions = assign_parking_ids(
@@ -363,7 +389,7 @@ def map_semantics(graph_data, label_data, detected_regions, *, expected_map_id=N
 
     # 건물 A/B 및 입구/출구에 의미 부여
     building_specs, gate_specs = label_data["buildings"], label_data["gates"]
-    if map_id == REAL_MAP_ID:
+    if uses_real_map_profile(label_data):
         facilities = assign_dark_facilities(buildings, building_specs + gate_specs)
         named_buildings = facilities[:len(building_specs)]
         named_gates = facilities[len(building_specs):]
@@ -386,6 +412,8 @@ def map_semantics(graph_data, label_data, detected_regions, *, expected_map_id=N
         "nodes": nodes,
         "regions": parking_regions + named_gates + named_buildings,
         "map_id": map_id,
+        **({"id_assignment_revision": label_data["id_assignment_revision"]}
+           if "id_assignment_revision" in label_data else {}),
     }
 
 
@@ -403,15 +431,26 @@ def create_semantic_map(
         graph_data = json.load(f)
     with open(label_path, "r", encoding="utf-8-sig") as f:
         label_data = json.load(f)
+    image_sha256 = sha256(Path(image_path).read_bytes()).hexdigest()
+    if label_data.get("image_sha256", image_sha256) != image_sha256:
+        raise ValueError("라벨의 기준 사진과 현재 지도 이미지가 다릅니다.")
+    if "map_image_sha256" in graph_data or label_data.get("id_assignment_revision"):
+        require_map_identity({"map_image_sha256": image_sha256}, graph_data, "도로 그래프")
+    graph_data["map_image_sha256"] = image_sha256
     height, width = image.shape[:2]
-    label_data = resolve_cm_hints(label_data, (width, height), calibration_path)
+    label_data = resolve_cm_hints(
+        label_data, (width, height), calibration_path, image_sha256=image_sha256,
+    )
 
     map_id = label_data.get("map_id")
-    detected = detect_regions(image, map_id=map_id)
+    real_profile = uses_real_map_profile(label_data)
+    if "paper_corners_px" in label_data:
+        image = mask_paper_background(image, label_data["paper_corners_px"])
+    detected = detect_regions(image, map_id=map_id, real_profile=real_profile)
     normal, accessible, buildings, gates = detected
     print("Normal spaces detected:", len(normal))
     print("Accessible spaces detected:", len(accessible))
-    if map_id == REAL_MAP_ID:
+    if real_profile:
         print("검은색 시설 후보:", len(buildings))
     else:
         print("Buildings detected:", len(buildings))
@@ -419,7 +458,7 @@ def create_semantic_map(
     semantic_data = map_semantics(
         graph_data, label_data, detected, expected_map_id=expected_map_id
     )
-    if map_id == REAL_MAP_ID:
+    if real_profile:
         print("매칭된 건물:", len(label_data["buildings"]))
         print("매칭된 입출구:", len(label_data["gates"]))
 

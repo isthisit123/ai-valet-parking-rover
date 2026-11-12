@@ -2,6 +2,7 @@ import copy
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from src.map_processing.map_identity import map_identity
 from src.map_processing.occupancy import occupancy_states
 from src.map_processing.parking_selector import load_parking_map, select_parking_from_map
 
@@ -12,7 +13,7 @@ class OccupancyTest(unittest.TestCase):
         self.now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
         self.snapshot = {
             "schema_version": "0.1-draft",
-            "map_id": self.map_data["map_id"],
+            **map_identity(self.map_data),
             "observed_at": self.now.isoformat(),
             "spaces": [
                 {"parking_space_id": "space_1", "status": "occupied", "confidence": 0.9},
@@ -52,6 +53,7 @@ class OccupancyTest(unittest.TestCase):
 
     def test_invalid_contract_is_rejected(self):
         for key, value in (("map_id", "another_map"), ("schema_version", "2"),
+                           ("id_assignment_revision", "old"), ("map_image_sha256", "0" * 64),
                            ("observed_at", "2026-11-11T12:00:00")):
             snapshot = {**self.snapshot, key: value}
             with self.subTest(key=key), self.assertRaises(ValueError):
@@ -90,6 +92,7 @@ class OccupancyTest(unittest.TestCase):
             occupancy=self.snapshot, now=self.now,
         )
         self.assertEqual(route["parking_space_id"], "space_2")
+        self.assertEqual(map_identity(route), map_identity(self.map_data))
         self.assertEqual(route["occupancy_observed_at"], self.snapshot["observed_at"])
         self.assertGreater(len(route["waypoints"]), 1)
         legacy = select_parking_from_map(self.map_data, self.graph, "entrance")

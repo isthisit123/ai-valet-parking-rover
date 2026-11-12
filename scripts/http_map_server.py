@@ -19,7 +19,7 @@ import numpy as np
 
 from src.map_processing.graph_exporter import build_road_graph, save_graph
 from src.map_processing.map_config import BASE_DIR, DEFAULT_MAP, MapConfig
-from src.map_processing.semantic_mapper import detect_regions, map_semantics
+from src.map_processing.semantic_mapper import detect_regions, map_semantics, mask_paper_background
 
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
@@ -81,15 +81,7 @@ def prepare_paper_image(image, preparation):
     if abs(width/height-rw/rh) >= 0.005:
         raise ValueError("종이 외곽 설정과 영상 비율이 다릅니다.")
     corners = np.asarray(preparation["paper_corners_px"], dtype=float) * [width/rw, height/rh]
-    if corners.shape != (4, 2) or not np.isfinite(corners).all():
-        raise ValueError("종이 외곽점은 유효한 네 점이어야 합니다.")
-    if (corners < 0).any() or (corners[:, 0] >= width).any() or (corners[:, 1] >= height).any():
-        raise ValueError("종이 외곽점이 입력 이미지를 벗어났습니다.")
-    mask = np.zeros((height, width), np.uint8)
-    cv2.fillConvexPoly(mask, np.round(corners).astype(np.int32), 255)
-    result = image.copy()
-    result[mask == 0] = 255
-    return result
+    return mask_paper_background(image, corners)
 
 
 def generate_map(body, output_root, *, labels_path=DEFAULT_MAP.label_path,

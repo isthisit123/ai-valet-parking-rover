@@ -9,6 +9,8 @@ DEFAULT_OUTPUT_ROOT = BASE_DIR / "data" / "maps"
 TEST_MAP_ID = "parking_map_v1_test"
 REAL_MAP_ID = "parking_map_real"
 DEFAULT_MAP_ID = REAL_MAP_ID
+OCR_LABEL_SCHEME = "A,B,P1-P6,EN,EX"
+OCR_ID_REVISION = "ocr-p-labels-v1"
 
 # HSV 범위는 하한과 상한 순서다. 시설 설정의 마지막 값은 최소 면적이다.
 ROAD_HSV_RANGES = (
@@ -75,10 +77,7 @@ def available_map_ids():
     )
 
 
-def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
-    if map_id not in available_map_ids():
-        raise ValueError(f"지도 {map_id!r}의 PNG 이미지와 _labels.json 파일이 필요합니다.")
-
+def map_paths(map_id, *, output_root=DEFAULT_OUTPUT_ROOT):
     return MapConfig(
         map_id=map_id,
         image_path=MAPS_DIR / f"{map_id}.png",
@@ -87,7 +86,14 @@ def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
     )
 
 
-DEFAULT_MAP = get_map_config()
+def get_map_config(map_id=DEFAULT_MAP_ID, *, output_root=DEFAULT_OUTPUT_ROOT):
+    if map_id not in available_map_ids():
+        raise ValueError(f"지도 {map_id!r}의 PNG 이미지와 _labels.json 파일이 필요합니다.")
+    return map_paths(map_id, output_root=output_root)
+
+
+# 라벨을 처음 생성하는 명령에서도 기본 경로를 가져올 수 있어야 한다.
+DEFAULT_MAP = map_paths(DEFAULT_MAP_ID)
 
 
 def create_map_parser(description, *, uses_output_dir=True):

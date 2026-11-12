@@ -1,4 +1,12 @@
 {
+  "map_id": "parking_map_real",
+  "map_image_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd",
+  "coordinate_frame": "map_image",
+  "origin": "top_left",
+  "axis_directions": {
+    "x": "right",
+    "y": "down"
+  },
   "unit": "pixel",
   "nodes": [
     {

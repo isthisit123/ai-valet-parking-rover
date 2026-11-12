@@ -1,12 +1,14 @@
 
 import json
 import math
+from hashlib import sha256
 
 import cv2
 import networkx as nx
 import numpy as np
 
 from .map_config import DEFAULT_MAP, ENDPOINT_RADIUS, JUNCTION_RADIUS, parse_map_config
+from .map_identity import AXES
 from .map_reader import get_road_mask
 from .graph_builder import (
     remove_small_components,
@@ -198,6 +200,11 @@ def save_graph(graph, skeleton, *, config=DEFAULT_MAP):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(
             {
+                "map_id": config.map_id,
+                "map_image_sha256": sha256(config.image_path.read_bytes()).hexdigest(),
+                "coordinate_frame": "map_image",
+                "origin": "top_left",
+                "axis_directions": AXES,
                 "unit": "pixel",
                 "nodes": nodes,
                 "edges": edges
@@ -239,7 +246,10 @@ def save_graph(graph, skeleton, *, config=DEFAULT_MAP):
 
     # 그래프 시각화 이미지 저장
     preview_path = config.preview_path
-    cv2.imwrite(str(preview_path), preview)
+    success, encoded = cv2.imencode(".png", preview)
+    if not success:
+        raise OSError(f"그래프 미리보기 PNG를 인코딩할 수 없습니다. {preview_path}")
+    preview_path.write_bytes(encoded.tobytes())
 
     return json_path, preview_path
 

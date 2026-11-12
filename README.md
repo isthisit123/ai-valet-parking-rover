@@ -1,565 +1,64 @@
 # Q-ROVER — AI Valet Parking Rover
 
-## 현재 기본 지도 — OCR 이름표 기준 (2026-11-11)
+지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. 현재 **로컬 PNG → OCR 힌트 → 의미 지도 → cm 경로 미리보기**를 검증했습니다. 실제 카메라 점유 연동과 로버 주행은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
 
-최신 `parking_map_ocr.png`에서 A/B·P1~P6·EN/EX 10개를 인식한 결과로
-`parking_map_real_labels.json`의 힌트를 갱신했습니다. 일반석은 **P1/P2/P4/P5**,
-장애인석은 **P3/P6**입니다. A는 왼쪽 아래, B는 오른쪽 위입니다.
-번호를 새로 부착한 사용자 요청에 따른 명시적인 ID 재할당이며 기존 ID 유지 검증과 구분합니다.
+## 기본 지도
 
-`parking_map_real.png`는 OCR 원본에서 주차장 종이 바깥만 흰색으로 처리한 지도 입력입니다.
-원본 OCR 사진은 그대로 유지하며 크기/픽셀 좌표는 1280×720으로 동일합니다.
-EX 검은 영역이 오른쪽 배경과 연결돼 검출에서 제외되는 문제를 피하기 위한 처리입니다.
-외곽점은 이번 사진에서 수동 확인했으며 `parking_map_real_preparation.json`에 저장했습니다.
-카메라 구도가 바뀌면 외곽점도 다시 확인해야 합니다. `src` 검출 로직은 이번 갱신에서 바꾸지 않았습니다.
+- `assets/maps/parking_map_real.png`가 기본 지도입니다. `parking_map_ocr.png`에서 종이 바깥만 흰색 처리했습니다. 원본 해상도와 내부 픽셀은 같습니다. 외곽 설정은 [parking_map_real_preparation.json](assets/maps/parking_map_real_preparation.json)에 있습니다.
+- 이름표는 건물 **A/B**, 입구 **EN**, 출구 **EX**, 주차칸 **P1~P6**입니다. `P3`·`P6`은 파란색 장애인석이고 나머지는 초록색 일반석입니다. 도로는 빨강, 건물과 출입구는 검정입니다.
+- OCR 라벨, 카메라 구역, 점유 JSON, 경로는 같은 지도 ID·칸 ID 버전·기준 사진 해시를 사용합니다. [팀 통합 규칙](docs/TEAM_GUIDE.md#통합-기준-지도점유경로)
 
-기본 `graph.json`, `semantic.json`, 다섯 경로 PNG/JSON과 테스트 기준값도 재생성했습니다.
-14노드·13간선·연결 True, 일반 4·장애인 2·건물 2·입출구 2이며 전체 테스트 40개가 통과했습니다.
+## 설치 및 지도 생성
 
-옛 칸 ID → 현재 ID는 `space_1→1`, `space_2→2`, `space_3→4`, `space_4→5`,
-`space_5→3`, `space_6→6`입니다(화살표 오른쪽 숫자도 `space_` 접두사를 가짐).
-ParkingHaeven 매핑의 ID 대응은 이관했지만 **새 구도의 영역 좌표가 없으므로**
-상태는 `requires_new_camera_regions`, 변환 행렬은 null입니다. 옛 점유 파일은 사용하지 않습니다.
-기존 지도·라벨·매핑·점유 시험 결과는 `archives/before_ocr_rule_update_20261111_221709/`에 보관했습니다.
+저장소 루트에서 최초 한 번 실행합니다. 이미 준비된 가상환경이 있으면 해당 Python을 사용하세요.
 
-## 시설 표기 OCR 시험 — A, B, P1~P6, EN, EX
+```powershell
+py -m venv .venv
+$python = ".\.venv\Scripts\python.exe"
+& $python -X utf8 -m pip install -r requirements.txt
 
-`scripts/ocr_buildings.py`는 다음 고정 표기를 읽는 독립 시험 도구입니다.
+& $python -m venv .venv-ocr
+& .\.venv-ocr\Scripts\python.exe -X utf8 -m pip install -r requirements-ocr.txt
+```
 
-| 인쇄 표기 | 프로젝트 ID |
+새 사진을 `assets/maps/parking_map_new.png`로 저장한 뒤 실행합니다.
+
+```powershell
+& $python -m scripts.generate_map --map-id parking_map_new --replace
+```
+
+OCR이 시설 10개의 좌표를 추출해 `assets/maps/parking_map_new_labels.json`을 만듭니다. 색상 영역과의 매칭이 성공하면 `data/maps/parking_map_new/`에 `graph.json`, `graph_preview.png`, `semantic.json`을 저장합니다. 같은 ID로 재실행하면 같은 위치의 결과를 갱신합니다. OCR 실패나 매칭 오류가 나면 이전 결과를 보존하고, 상세 기록은 `data/ocr_building_tests/`에 남깁니다.
+
+기존 기본 지도에서 시험하려면 `--map-id parking_map_real --replace`를 사용합니다. 종이 바깥과 검은 시설이 붙어 보이는 사진은 원본과 해시가 일치하는 외곽 설정을 자동 사용하거나 `--paper-preparation <파일>`을 지정합니다.
+
+## cm 경로 미리보기
+
+```powershell
+& $python -m src.rover_control --points floor_points.json
+```
+
+현재 기본 지도 결과는 `data/rover_runs/cm_preview/parking_map_real/`에 나옵니다. `floor_points.json`은 현재 기본 PNG에 대응합니다. 다른 사진으로 바꿨다면 해당 사진의 기준점 파일을 사용하세요.
+
+전지 모서리만 쓴 결과는 `world_estimate` 미리보기입니다. 같은 PNG에서 실측 기준점 4개를 등록하고 검증을 통과하면 실행별 폴더에 주행용 `*_cm.json`도 생성합니다. 로버 설치·배선은 [수신 앱 가이드](apps/q_rover_receiver/README.md), 위치와 경로 규약은 [팀 가이드](docs/TEAM_GUIDE.md#경로와-로버-위치)를 참고하세요.
+
+## 웹에서 PNG 전송
+
+```powershell
+$webRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Source'
+& $python -m scripts.http_map_server --web-root $webRoot --port 8001
+```
+
+[localhost:8001](http://localhost:8001)에서 **현재 화면 PNG 전송 · 맵 생성**을 누릅니다. 서버는 `POST /api/map-capture`로 원본 PNG를 받아, 기존 픽셀 힌트로 그래프·의미 지도·보고서를 `data/http_map_captures/<capture_id>/`에 저장합니다. 기준 사진과 같은 카메라 위치·줌·크롭이 필요합니다.
+
+HTTP의 현재 범위는 **기존 힌트로 의미 지도 생성까지**입니다. 새 캡처의 OCR 힌트 생성과 cm 경로 생성은 로컬 명령에 구현돼 있고, 웹 버튼에는 연결할 예정입니다.
+
+## 대체된 작업 방식
+
+| 이전 | 현재 |
 | --- | --- |
-| `A`, `B` | `building_a`, `building_b` |
-| `P1`~`P6` | `space_1`~`space_6` |
-| `EN`, `EX` | `entrance`, `exit` |
-
-기본 실행에서 A/B 한 글자를 바로 허용합니다. 영문 대소문자·앞뒤 공백·전각 표기는 정규화하지만,
-`I`를 `1`로, `8`을 `B`로 추측하지 않습니다. 이전 `BUILDING_A/B`는 새 표기 규칙의 대상이 아닙니다.
-이름표는 크게 인쇄하고 주변의 다른 문자와 떨어뜨려 배치하세요.
-주차칸은 P가 붙은 `P1`~`P6`만 허용하며 단독 숫자 `1`~`6`은 채택하지 않습니다.
-
-RapidOCR/ONNX Runtime을 CPU에서 사용합니다. RapidOCR의 `opencv-python-headless`가 기존 GUI용
-OpenCV와 충돌하지 않도록 **기존 `.venv`와 별도인 `.venv-ocr`**에 설치합니다.
-이 PC의 OCR 전용 환경은 설치·실행 확인했습니다. 다른 환경에서 처음 설치할 때는 다음을 사용합니다.
-
-```powershell
-python -m venv .venv-ocr
-.\.venv\Scripts\python.exe -m pip --python .\.venv-ocr\Scripts\python.exe install -r requirements-ocr.txt
-```
-
-실행할 때 활성화할 필요 없이 OCR용 Python을 직접 지정합니다.
-
-```powershell
-.\.venv-ocr\Scripts\python.exe -m scripts.ocr_buildings --image 'assets/maps/parking_map_ocr.png'
-# 아직 A/B만 붙인 사진은 두 건물만 필수 검사
-.\.venv-ocr\Scripts\python.exe -m scripts.ocr_buildings --image 'assets/maps/parking_map_ocr.png' --buildings-only
-```
-
-HTTP로 받은 `data/http_map_captures/<capture_id>/source.png`도 `--image`에 지정할 수 있습니다.
-현재 HTTP 버튼은 OCR을 자동 실행하지 않습니다. 파일을 받아 위 명령으로 별도 시험합니다.
-
-결과는 Git 제외 `data/ocr_building_tests/<회차>/report.json`과 `preview.png`에 저장합니다.
-JSON에는 전체 인식 원문, 원본 픽셀 사각형, 점수, 시설 10개의 인식 상태와 중심 후보를 기록합니다.
-전체 영상 OCR이 한 글자를 놓치면 기존 색상 검출 함수가 찾은 영역을 잘라 보완 인식합니다.
-초록/파란 주차 영역은 P1~P6만, 검은색 시설 후보는 A/B/EN/EX만 보완 대상으로 허용합니다.
-같은 영역에 이미 높은 점수의 인식이 있으면 재인식하지 않습니다. `box_kind`가
-`color_region_recognition`이면 사각형과 중심은 글자 자체가 아닌 **색상 후보 영역** 기준입니다.
-시설 전체 인식도 실패하면 내부의 밝고 낮은 채도 글자 후보를 좁게 잘라 3배 확대해 읽습니다.
-`P`와 `1`처럼 따로 떨어진 글자 조각은 높이·줄 위치·간격 조건을 만족할 때 묶어서 읽습니다.
-다른 줄이거나 멀리 떨어진 조각은 합치지 않으며 단독 `P`를 `P1`로 추측하지 않습니다.
-이 경우 `box_kind`는 `bright_text_patch`이며 좌표는 원본 픽셀로 기록합니다. 작은 반사/그림자로
-같은 글자가 겹쳐 검출된 경우만 병합하고, 떨어진 같은 ID나 서로 다른 ID 충돌은 자동 확정하지 않습니다.
-`region_attempts`에는 잘못 읽어 채택하지 않은 영역/글자 후보와 점수도 기록합니다.
-`--no-region-fallback`으로 보완 인식을 끄고 전체 영상 OCR과 비교할 수 있습니다.
-**중심 후보는 아직 전체 시설 매핑용 힌트로 검증되지 않았습니다.**
-기본 힌트 JSON과 `src`, 지도 생성 결과는 변경하지 않습니다.
-
-최소 점수 기본값 0.75는 초기 시험값입니다. `--min-score`로 바꿀 수 있습니다.
-누락·낮은 점수·같은 건물 ID 중복이면 결과를 보존하고 종료 코드 2 (`needs_review`),
-실행 자체가 실패하면 종료 코드 1, 필수 표기 모두 인식 성공은 종료 코드 0입니다.
-기본 필수 표기는 10개 전체이며 `--buildings-only`는 A/B만 필수로 검사합니다.
-이전 소형 숫자 이름표 사진은 이 전처리 후 A/B·1~6·EN/EX 모두 인식됐습니다.
-현재는 사용자 요청으로 주차칸 표기를 P1~P6으로 변경했고 관련 테스트 9개가 통과했습니다.
-P가 붙은 최신 사진에서 P1~P6·A/B·EN/EX 10개 인식을 확인했고, 관련 테스트는 현재 10개입니다.
-P1 누락은 `P`와 `1`의 글자 조각 분리 문제였으며 인접 글자 묶기로 해결했습니다.
-한 사진에서의 인식 결과이며 다른 조명·거리에서의 정확도와 전체 시설 매핑은 아직 검증하지 않았습니다.
-현재 기본 지도는 P3/P6을 장애인석으로 갱신했습니다. OCR 시험 도구 자체는 기본 라벨을
-덮어쓰지 않으며, 최신 기본 지도 반영은 위의 별도 검증/갱신 작업으로 수행했습니다.
-기존 `--allow-single-letter`는 이전 명령 호환용으로만 남아 있으며 지정할 필요 없습니다.
-
-```powershell
-.\.venv-ocr\Scripts\python.exe -m unittest discover -s tests -p test_ocr_buildings.py -v
-```
-
-## HTTP로 웹 PNG를 받아 맵 생성
-
-프로젝트 루트에서 다음 명령을 실행하고 **http://localhost:8001**을 엽니다.
-
-```powershell
-python -m scripts.http_map_server
-```
-
-이 서버는 옆 폴더 `../ParkingHaeven/Source`를 읽어 기존 웹 화면을 제공하면서 페이지 아래에
-**현재 화면 PNG 전송 · 맵 생성** 버튼을 추가합니다. ParkingHaeven 원본 파일과 `src`는
-수정하지 않습니다. 웹에서 카메라를 시작하고 차량을 모두 치운 상태에서 버튼을 누르세요.
-기존 카메라 사용 웹/앱이 같은 장치를 점유했다면 먼저 종료합니다. 사진 입력으로도 시험할 수 있습니다.
-
-원본 `main-canvas`만 복사해 `image/png` 본문으로 `POST /api/map-capture`에 전송합니다.
-별도 `overlay-canvas`의 주차칸 테두리/검출 박스는 들어가지 않습니다. Python은 카메라를 열지 않고
-수신 PNG를 그대로 저장한 다음 기존 그래프·시설 매핑 함수를 호출합니다. 새 패키지는 필요 없습니다.
-
-전송할 때마다 `data/http_map_captures/<capture_id>/`에 다음을 저장합니다.
-
-- `source.png`: 실제 받은 PNG, 크롭·리사이즈 없이 보존
-- `map.png`: 현재 종이 외곽 설정으로 바깥 배경을 제외한 지도 입력
-- `labels.json`: 받은 영상 좌표로 변환한 시설/주차칸 힌트
-- `graph.json`, `graph_preview.png`: 그래프와 미리보기
-- `semantic.json`: 시설 ID가 연결된 의미 지도 (성공한 경우)
-- `report.json`: 영상 크기, 수신 시각, 변환 조건, 생성 결과/오류
-
-이 폴더는 `.gitignore`에 등록했습니다. 기본 `assets/maps/parking_map_real.png`, 라벨 및
-`data/maps/parking_map_real/`의 기존 결과는 덮어쓰지 않습니다. 새로운 결과를 기본 지도로
-채택하거나 기존 점유 매핑과 자동으로 연결하는 작업은 아직 하지 않습니다.
-
-현재 힌트와 종이 외곽은 최신 1280×720 OCR 사진 기준입니다. 16:9 입력은 같은 구도라는 조건으로
-배율을 적용합니다. 기존 4:3 카메라 매핑은 무효화했으므로 그 변환을 재사용하지 않습니다.
-종횡비만으로 구도 일치를 증명하지는 못합니다. 카메라 위치/줌/크롭이 바뀌거나 지원하지 않는
-영상 비율이면 힌트/매핑을 다시 확인해야 합니다. 매핑 실패는 HTTP 422로 표시하고 받은 사진과
-중간 결과를 보존합니다. 그래프만 생성된 경우를 의미 지도 생성 성공으로 표시하지 않습니다.
-
-웹 루트나 포트를 변경하려면 다음 옵션을 사용합니다.
-
-```powershell
-python -m scripts.http_map_server --web-root 'C:\Users\urmkm\Desktop\ParkingHaeven\Source' --port 8001
-python -m unittest discover -s tests -p test_http_map_server.py -v
-```
-
-기존 `../parking_training_kit/aruco_server.py`가 있으면 해당 모듈의 `/api/aruco` 기능도 그대로
-사용합니다. 없으면 지도 전송 기능만 동작합니다. 포트가 다른 기존 웹 화면(예: 8000)과 새 화면(8001)은
-localStorage가 별개이므로 이전에 저장한 영역이 새 주소에 자동으로 나타나지는 않습니다.
-
-검증: 로컬 HTTP에서 저장 PNG 수신 → 14노드·13간선·연결 True → 일반 4·장애인 2·시설 총 10개
-의미 지도 생성, 원본 PNG 바이트 보존 및 기본 파일 미변경을 확인했습니다. HTTP/좌표/오류 처리 테스트
-현재 HTTP 관련 테스트 5개가 통과했습니다. 과거 4:3 합성 시험은 이전 지도에 대한 기록입니다.
-브라우저 버튼 표시는 확인했으며, 실제 카메라의 현재 프레임 전송은 사용자 카메라로 확인해야 합니다.
-
-## ParkingHaeven 저장 점유 파일로 경로 재현 (이전 지도 기록)
-
-**현재는 새 카메라 영역 JSON으로 매핑을 재설정해야 합니다. 아래 이전 실행 명령은
-무효화된 매핑에서 오류로 중단됩니다.** 옛 점유 상태를 새 번호의 칸에 적용하지 않습니다.
-이전 `test_snapshot.json`, `test_results.json`, `occupancy_test_routes`는 백업 폴더로 옮겼습니다.
-
-```powershell
-python -m scripts.parkinghaeven_replay --source 'C:\Users\urmkm\Downloads\all_parking_regions (1).json'
-```
-
-`src` 변경 없이 별도 스크립트가 아래 파일을 읽어 정적 테스트를 실행합니다.
-
-- 원본 ParkingHaeven 점유 JSON (`--source`)
-- `assets/maps/parking_map_real_parkinghaeven_mapping.json`: 원본 ID와 지도 ID, 좌표 변환
-- `data/maps/parking_map_real/semantic.json`: 현재 그래프와 시설 정보
-- `assets/maps/parking_map_real.png`: 지도 일치 검증과 경로 시각화
-
-변환한 점유 상태는 `data/occupancy/parking_map_real/test_snapshot.json`, 검증 결과는 같은
-폴더의 `test_results.json`에 저장합니다. 경로는 기존 `routes/` 대신
-`data/maps/parking_map_real/occupancy_test_routes/`에 저장합니다.
-원본 영역 ID/좌표와 지도 이미지 해시를 확인하고, 변환 다각형과 해당 주차칸 bbox의
-IoU가 0.5 이상이며 다른 칸보다 가장 많이 겹치는지 검증합니다. 실제 주차칸 윤곽선과의
-IoU나 카메라 회전 대응을 검증한 것은 아닙니다.
-
-제공된 점유 파일에서는 `space_1`, `space_5`, `space_6`이 점유 상태입니다.
-기본 다섯 케이스와 일반석 입구/건물 B 두 케이스를 실행합니다.
-일반석 입구/건물 B 선택은 `space_1`에서 `space_2`로 바뀌고,
-장애인석 세 케이스는 빈칸이 없어 경로 대신 `no_free_spaces` 결과를 저장합니다.
-기본 다섯 케이스의 출력과 점유 테스트 출력은 별개입니다.
-
-원본에는 관측 시각·신뢰도·실패 구분이 없습니다. 저장 스냅샷은 `observed_at: null`,
-`confidence: null`, `usage: offline_test_only`로 이를 보존하며 `current.json`은 생성하지 않습니다.
-재현 스크립트 내부에서만 boolean을 정답으로 가정해 신뢰도 1.0의 fixture와
-고정 테스트 시각 `2000-01-01T00:00:00+00:00`을 사용합니다. 이는 모델 점수가 아니며,
-실제 현재 시각의 소비자에서는 만료됩니다. `test_snapshot.json`을 기존 selector의
-`--occupancy`에 직접 전달하면 시각 검증에서 거부됩니다. 재현은 위 스크립트로 실행하세요.
-실시간 `occupied: false`를 무조건 안전한 빈칸으로 해석하는 연동은 아직 하지 않았습니다.
-
-```powershell
-python -m unittest discover -s tests -p test_parkinghaeven_replay.py -v
-python -m unittest discover -s tests -p 'test*occupancy.py' -v
-```
-
-## 주차 점유 JSON 연결 (2026-11-11)
-
-`parking_training_kit`의 학습 사진·라벨은 모델 입력 데이터입니다. 학습 모델은 별도 폴더인
-`C:\Users\urmkm\Desktop\ParkingHaeven\Source\models\parking_cars.onnx`에서 확인했습니다.
-OpenCV ONNX 추론으로 학습 사진 한 장에서 차량 3대 검출까지 확인했습니다.
-**ONNX → 카메라 ROI별 점유 JSON → 최신 free 칸 선택 → 픽셀 경로 생성**을 지원합니다.
-새로운 의존성은 없습니다. 실제 카메라의 6칸 ROI 설정과 빈 배경 사진 확인은 아직 필요합니다.
-
-### 실제 카메라 설정 순서
-
-프로젝트 루트에서 실행합니다. 카메라 번호는 장치에 맞게 바꿉니다. 먼저 주차장을 비우고
-카메라를 고정한 뒤 기준 사진을 저장합니다. 아래 추론 명령은 한 프레임만 처리합니다.
-
-```powershell
-$parkingModel = 'C:\Users\urmkm\Desktop\ParkingHaeven\Source\models\parking_cars.onnx'
-# 1. 카메라 원본 한 장 저장 (차량을 모두 치운 상태)
-.\.venv\Scripts\python.exe -m src.parking_detection.onnx_occupancy --model $parkingModel --camera 1 --output archives/occupancy_setup/initial.json --save-frame archives/occupancy_setup/empty.png
-
-# 2. 지도 ID 안내 창을 보며 카메라 사진의 각 칸 네 모서리를 순서대로 클릭
-# Enter: 확정, R: 현재 칸 다시 지정, Esc: 취소. 실제로 빈 사진인지 확인한 경우에만 플래그 사용
-.\.venv\Scripts\python.exe -m src.parking_detection.configure_regions --image archives/occupancy_setup/empty.png --output archives/occupancy_setup/regions.json --verified-empty-reference
-
-# 3. 차량을 놓은 후 현재 프레임 점유 JSON 생성
-.\.venv\Scripts\python.exe -m src.parking_detection.onnx_occupancy --model $parkingModel --camera 1 --regions archives/occupancy_setup/regions.json --empty-reference archives/occupancy_setup/empty.png --output archives/occupancy_setup/current.json --preview archives/occupancy_setup/current.png
-
-# 4. TTL(기본 5초) 안에 실행. 만료 시 3번을 다시 실행
-.\.venv\Scripts\python.exe -m src.map_processing.parking_selector --occupancy archives/occupancy_setup/current.json
-```
-
-ROI는 원본 **카메라 픽셀**의 볼록 다각형이며 지도 bbox와 별도입니다. 카메라 해상도가 다르면
-오류로 중단합니다. 카메라 위치·줌·초점이 바뀌면 같은 해상도라도 다시 지정해야 합니다.
-빈칸은 차량 후보가 없고, 직접 확인한 빈 기준 사진과 ROI 픽셀의 98% 이상이 채널별 차이
-20 이하일 때만 판정합니다. 신뢰도 필드는 이때 배경 일치율이며 보정된 확률이 아닙니다.
-이 수치는 초기 실험 기준으로 실제 조명/차량에서 검증해야 합니다. 낮은 차량 검출 점수나
-기준 사진 불일치·손/물체 등은 unknown으로 남깁니다. 기준 사진 없이도 occupied 판정은 가능합니다.
-ROI 설정 없이 실행하면 차량 bbox만 기록하고 모든 칸은 unknown입니다.
-사진 입력 `--image`는 파일 수정 시각을 관측 시각으로 사용하므로 오래된 사진을 최신 관측으로
-취급하지 않습니다. 실제 카메라/웹 화면의 연속 추론, 자동 갱신·재계획은 아직 연결하지 않았습니다.
-
-### 점유 JSON과 선택 계약
-
-지도에서 사용하는 실제 ID는 `space_1`~`space_6`입니다. `P01`이나 `N0`로 바꾸지 않습니다.
-검출 생산자는 고정 카메라의 주차칸 ROI마다 이 ID를 연결해야 합니다. 카메라 구도·해상도가
-변하면 ROI를 다시 확인합니다. 지도 bbox와 다른 카메라 영상의 bbox를 직접 비교하지 않습니다.
-`parking_training_kit/YOLODetector.js`의 현재 `occupied` boolean만으로는 추론 실패와 빈칸을
-구별할 수 없으므로, 그 결과를 그대로 free로 변환하면 안 됩니다.
-
-소비하는 형식은 `docs/TEAM_GUIDE.md`의 `0.1-draft`입니다. 전체 스냅샷에 **실제 프레임 관측 시각**을
-시간대 포함 ISO 8601로 넣습니다. 과거 칸별 결과를 새 시각과 섞지 않습니다.
-
-```json
-{
-  "schema_version": "0.1-draft",
-  "map_id": "parking_map_real",
-  "observed_at": "2026-11-11T18:00:00+09:00",
-  "spaces": [
-    {"parking_space_id": "space_1", "status": "occupied", "confidence": 0.96},
-    {"parking_space_id": "space_2", "status": "free", "confidence": 0.91},
-    {"parking_space_id": "space_3", "status": "unknown", "confidence": null}
-  ]
-}
-```
-
-위 시각은 설명용입니다. 실행 시 최신 관측 시각으로 생성한 JSON이 필요합니다.
-기본 TTL은 5초이며, 미래 시각·만료·누락 칸은 unknown으로 취급합니다. free에는
-생산자가 판정한 점유 신뢰도 0.5 이상이 필요합니다. TTL과 신뢰도 기준은 초기 통합용이며
-실제 카메라에서 검증한 수치가 아닙니다. 차량 탐지 점수는 빈칸 신뢰도가 아닙니다.
-잘못된 지도 ID, 중복/알 수 없는 칸 ID, 잘못된 상태는 오류로 드러납니다.
-
-```powershell
-# 최신 점유 스냅샷을 읽어 조건별 빈 주차칸 선택
-python -m src.map_processing.parking_selector --occupancy occupancy.json --occupancy-ttl 5
-
-# 원본 결과 보호: 다른 폴더의 semantic.json을 읽고 그 폴더에 경로 저장
-python -m src.map_processing.graph_exporter --output-dir temp_results
-python -m src.map_processing.semantic_mapper --output-dir temp_results
-python -m src.map_processing.path_visualizer --output-dir temp_results --occupancy occupancy.json --preference entrance --parking-type normal
-
-python -m unittest discover -s tests -v
-```
-
-점유 옵션을 생략하면 기존 정적 시뮬레이션입니다. 실제 빈자리를 확인한 결과가 아닙니다.
-점유를 전달하면 free 후보가 없는 경우 오류로 중단합니다. 경로 JSON에는 선택 당시
-`occupancy_status`와 `occupancy_observed_at`이 추가됩니다. 생성된 경로는 픽셀 단위이며
-실시간 감시·예약·주행 중 재계획·모터 제어는 포함하지 않습니다.
-
-> **Arduino UNO Q 기반 모형 주차장 자율 발렛파킹 프로젝트**  
-> **현재 단계:** 실물 지도 인식, 주차칸 선택, 다섯 가지 조건의 경로 PNG와 픽셀 waypoint JSON 생성
-
-## 1. 프로젝트 소개
-
-천장 고정 카메라와 **Arduino UNO Q(Q-ROVER)**를 이용해 모형 주차장의 주차 가능 공간을 파악하고, 사용자가 원하는 위치 조건에 맞는 주차칸을 선택한 뒤 로버가 해당 위치로 이동하도록 하는 프로젝트입니다.
-
-전체 시스템은 다음 흐름을 목표로 합니다.
-
-```text
-주차장 배치도 이미지
-    ↓ OpenCV 기반 시설/도로 검출
-도로 중심선 및 가중치 그래프 생성
-    ↓
-건물·입구·출구·주차칸 정보가 포함된 의미 지도(JSON)
-    ↓                     ↖ 향후 YOLO 점유 결과(별도 팀원)
-조건에 맞는 주차칸 선택
-    ↓ Dijkstra
-최단 경로 및 픽셀 waypoint 생성·시각화
-    ↓ 향후 실제 좌표 변환
-천장 카메라 + ArUco 기반 위치 추정 → Q-ROVER 주행 제어 [예정]
-```
-
-현재 **지도 인식은 AI 학습이 아닌 OpenCV 색상·형태 규칙 기반**입니다. YOLO를 이용한 차량 검출 및 주차칸 점유 판정은 **YOLO 담당 팀원과 병렬 개발**합니다. LLM/VLM 연동은 핵심 기능을 완료한 뒤 여유가 있을 때 검토하는 **선택적 확장**입니다.
-
-## 2. 기술 스택
-
-| 영역 | 기술 | 현재 용도 |
-| --- | --- | --- |
-| 지도 이미지 처리 | Python, OpenCV, NumPy | HSV 색상 분할, 연결 영역 검출 |
-| 도로 중심선 | scikit-image | Skeletonization(세선화) |
-| 그래프 및 경로 탐색 | NetworkX | 픽셀 그래프, 가중치 그래프, 다익스트라 |
-| 데이터 저장 | JSON | 노드, 간선, 주차 시설, 위치 힌트, 중심선 좌표 |
-| 실물 하드웨어(예정) | Arduino UNO Q / Q-ROVER | 모터 제어, 경로 추종 |
-| 위치 추정(예정) | 천장 카메라, ArUco, Homography | 픽셀 좌표→월드 좌표 변환 및 로버 위치 추정 |
-| 점유 상태(별도 담당) | YOLO | 각 주차칸의 점유 여부 전달 |
-
-**확인된 개발 환경:** Windows PowerShell, Python 3.12.2, `opencv-python`, `numpy`, `networkx`, `scikit-image`. 실제 설치 버전은 `requirements.txt` 및 로컬 환경을 기준으로 확인해 주세요.
-
-## 3. 현재 구현된 기능
-
-- **도로 추출:** HSV 색상 분할로 빨간 도로를 찾고, 가장 큰 연결 영역만 남겨 범례 등 분리된 빨간 영역을 제거합니다.
-- **도로 중심선 생성:** 도로를 약 1픽셀 두께로 세선화하고 8-이웃 관계로 끝점·교차점 후보를 검출합니다.
-- **가중치 그래프 생성:** 도로 끝점·교차점을 노드로, 중심선 구간을 간선으로 변환합니다. 간선마다 픽셀 단위 `weight`와 순서 있는 `path` 좌표를 저장합니다.
-- **의미 지도 생성:** 일반/장애인 주차칸, 건물, 입구/출구를 색상과 영역 기준으로 검출합니다. 주차칸과 출입구는 도로 끝점에 연결하고, 건물은 별도 사각형 영역으로 저장합니다.
-- **시설 이름 부여:** 지도별 `<map_id>_labels.json` 위치 힌트로 건물 A/B와 입구/출구를 식별합니다.
-- **주차칸 선택:** `entrance`, `exit`, `building_a`, `building_b` 네 가지 선호 조건으로 일반 주차칸 중 목적지를 선택합니다.
-- **다익스트라:** 선택된 목적지까지 입구에서 이동할 그래프 노드 경로와 거리를 계산합니다.
-- **경로 시각화:** 지도 위에 출발점·교차점·목적지를 표시하고, 같은 경로를 픽셀 waypoint JSON으로 저장합니다.
-
-**후속 통합 항목**은 실제 cm 단위 좌표 변환, 실시간 주차 점유 반영, ArUco 위치 추정과 로버 주행 제어입니다.
-
-## 4. 프로젝트 구조
-
-아래는 대화에서 확인된 **현재 코드 구조 + 프로젝트 문서**입니다. 실제 저장소를 수정하기 전 로컬 파일을 먼저 확인해 주세요.
-
-```text
-ai-valet-parking-rover/
-├── README.md                         # 프로젝트 개요 및 실행 안내
-├── AGENTS.md                         # Codex 작업 지침
-├── docs/
-│   ├── TEAM_GUIDE.md                  # 팀 역할·브랜치·데이터 계약
-│   ├── ROADMAP.md                     # 팀별 단계/진행 현황
-│   └── PROJECT_HANDOFF.md             # 지도 코드 상세 이력·검증 로그
-├── assets/
-│   └── maps/
-│       ├── parking_map_real.png         # 기본 실물 지도 사진
-│       └── parking_map_real_labels.json # 시설 ID와 위치 힌트
-├── archives/                         # 이전 지도·사진·JSON·경로 결과, Git 제외
-├── src/
-│   └── map_processing/
-│       ├── map_config.py              # 지도 폴더 탐색과 공통 경로·검출 설정
-│       ├── map_reader.py              # 빨간 도로 마스크 추출
-│       ├── graph_builder.py           # 세선화, 끝점·교차점 검출
-│       ├── graph_exporter.py          # 그래프 생성 및 JSON/미리보기 저장
-│       ├── semantic_mapper.py         # 시설 검출 및 의미 정보 연결
-│       ├── parking_selector.py        # 조건별 주차칸 선택 및 다익스트라
-│       └── path_visualizer.py         # 최단 경로 PNG와 픽셀 waypoint JSON 저장
-├── data/
-│   └── maps/
-│       └── parking_map_real/
-│           ├── graph.json            # 도로 그래프
-│           ├── semantic.json         # 시설·주차칸 정보가 추가된 그래프
-│           ├── graph_preview.png     # 노드 미리보기
-│           └── routes/
-│               ├── 01_building_a.png
-│               ├── 01_building_a.json
-│               └── …                 # 다섯 케이스의 PNG와 JSON
-├── requirements.txt
-└── .gitignore
-```
-
-기본 입력은 `assets/maps/parking_map_real.png`와 `parking_map_real_labels.json`입니다. 생성 결과는 `data/maps/parking_map_real/`에 모입니다. 다른 지도를 사용하려면 `assets/maps/<map_id>.png`와 `<map_id>_labels.json`을 추가하고 라벨 내부 `map_id`를 맞춥니다. 이 파일 쌍은 `--map-id` 목록에 자동으로 나타납니다.
-
-이전 입력과 결과는 프로젝트 루트의 `archives/`에 보관합니다. 이 폴더는 `.gitignore`에 등록되어 있으며 기본 입력 검색과 테스트 대상에서 제외합니다.
-
-## 5. 설치 및 실행
-
-### 5.1 환경 준비 (Windows PowerShell)
-
-프로젝트 **최상위 폴더**에서 실행합니다. 처음 가져온 팀원은 아래 명령을 사용하면 됩니다.
-
-```powershell
-git clone https://github.com/isthisit123/ai-valet-parking-rover.git
-cd ai-valet-parking-rover
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
-
-이미 프로젝트와 가상환경이 있다면 해당 폴더에서 `.\.venv\Scripts\Activate.ps1`만 실행하면 됩니다. Python 패키지/모듈을 확실히 같은 가상환경으로 실행하려면 활성화 후 `python -m ...` 형식을 권장합니다.
-
-### 5.2 실행 순서
-
-```powershell
-# 1. 도로 중심선 및 그래프 생성
-python -m src.map_processing.graph_exporter
-
-# 2. 주차칸·건물·입출구 의미 정보 추가
-python -m src.map_processing.semantic_mapper
-
-# 3. 조건별 주차칸 선택 및 다익스트라 경로 계산
-python -m src.map_processing.parking_selector
-
-# 4. 다섯 케이스의 경로 PNG와 waypoint JSON 저장
-python -m src.map_processing.path_visualizer
-```
-
-각 단계의 입출력은 다음과 같습니다.
-
-| 단계 | 입력 | 생성·출력 |
-| --- | --- | --- |
-| `graph_exporter` | `assets/maps/<map_id>.png` | `data/maps/<map_id>/graph.json`, `graph_preview.png` |
-| `semantic_mapper` | 지도 이미지, 그래프 JSON, `assets/maps/<map_id>_labels.json` | `data/maps/<map_id>/semantic.json` |
-| `parking_selector` | 의미 지도 JSON | 선택 주차칸, 조건 점수, 노드 경로, 입구부터의 거리(터미널) |
-| `path_visualizer` | 지도 이미지, 의미 지도 JSON | `data/maps/<map_id>/routes/`의 조건별 PNG와 waypoint JSON |
-
-현재 파이프라인은 상대 import를 사용하므로 `.py` 파일을 개별 경로로 직접 실행하기보다 **`python -m src.map_processing.<모듈명>`** 형식으로 실행합니다.
-
-특정 조건만 코드에서 시험하려면:
-
-```python
-from src.map_processing.parking_selector import select_parking
-
-result = select_parking("building_a")
-print(result)
-```
-
-장애인 주차칸만 대상으로 네 조건의 선택 결과를 확인하려면 `python -m src.map_processing.parking_selector --map-id parking_map_real --parking-type accessible`을 실행합니다. 파이썬에서는 `select_parking("entrance", parking_type="accessible")`로 요청할 수 있습니다. 기본 선택 유형은 일반 주차칸입니다.
-
-기본 실행은 아래 다섯 케이스를 각각 PNG와 JSON으로 저장합니다.
-
-| 파일 이름 | 선택 조건 | 주차칸 유형 |
-| --- | --- | --- |
-| `01_building_a` | 건물 A에 가까운 칸 | 일반 |
-| `02_accessible` | 거리 조건 없이 고유 ID 순으로 한 칸 선택 | 장애인 |
-| `03_exit` | 출구에 가까운 칸 | 일반 |
-| `04_building_b_accessible` | 건물 B에 가까운 칸 | 장애인 |
-| `05_entrance_accessible` | 입구에 가까운 칸 | 장애인 |
-
-한 조건만 저장하려면 `python -m src.map_processing.path_visualizer --preference exit --parking-type normal`을 실행합니다. 이 경우 출력 이름은 `routes/exit_normal.png`와 `routes/exit_normal.json`입니다. `--preference any --parking-type accessible`은 거리 조건 없이 장애인석 한 칸을 선택합니다. 다른 지도를 처리할 때는 각 명령에 같은 `--map-id`를 전달합니다.
-
-`--output-dir <폴더>`를 지정하면 생성 결과의 기준 폴더를 바꿀 수 있습니다. 예를 들어 `--output-dir temp_results --map-id parking_map_real`은 `temp_results/parking_map_real/`에 결과를 저장합니다. 후속 명령에도 같은 값을 전달합니다. 인자를 생략하면 `parking_map_real`을 사용합니다.
-
-경로 JSON은 지도·주차칸 ID, 노드 순서, 그래프 이동 거리인 `total_distance`와 픽셀 `waypoints`를 담습니다. 좌표계는 `map_image`이며 좌상단 원점에서 x는 오른쪽, y는 아래로 증가합니다. 경로는 입구 도로 노드에서 선택 주차칸에 연결된 도로 노드까지 이어집니다. 두 좌표 사이 간격이 1픽셀보다 큰 축에서는 선분을 따라 점을 채우고, 각 점이 검출된 도로 안에 있는지 검사합니다.
-
-중간 처리 이미지를 확인할 때:
-
-```powershell
-# 도로 마스크 미리보기
-python -m src.map_processing.map_reader
-
-# 도로 중심선·노드 검출 미리보기
-python -m src.map_processing.graph_builder
-```
-
-미리보기 창은 아무 키나 누르면 종료됩니다. `graph_builder`는 `data/maps/<map_id>/road_skeleton.png`도 저장합니다.
-
-## 6. 지도 이미지 작성 규칙 및 좌표계
-
-현재 지도 분석기는 일정한 색상 및 도형 규칙을 전제로 합니다.
-
-| 시설 | 표현 규칙 |
-| --- | --- |
-| 도로 | 빨간색 선 또는 영역 |
-| 일반 주차칸 | 초록색 바탕, `P` 표기 |
-| 장애인 주차칸 | 밝은 파란색 바탕, `P` 표기 |
-| 건물 | 어두운 회색/검은색 사각형 |
-| 입구·출구 | 실물 지도는 검은색 사각형 |
-
-기본 실물 지도는 초록색 일반 주차칸을 사용합니다. HSV와 최소 영역 면적은 `src/map_processing/map_config.py`에서 관리합니다. 이전 디지털 지도는 `archives/`에 보관합니다.
-
-건물 A/B 및 입구/출구의 이름은 `assets/maps/<map_id>_labels.json`에서 `id`와 `hint`를 지정해 매칭합니다. `hint`는 **이미지 좌상단 원점의 `[x, y]` 픽셀 좌표**로, 시설을 구별하기 위한 위치 힌트입니다.
-
-줄자로 잰 위치는 건물·출입구·주차칸의 `hint` 대신 `"hint_cm": [30.0, 40.0]`처럼 넣을 수 있습니다. 전지 왼쪽 위를 원점으로 오른쪽이 +x, 아래쪽이 +y입니다. 항목마다 `hint`와 `hint_cm` 중 하나를 지정하고, cm 힌트가 있으면 `python -m src.map_processing.semantic_mapper --calibration <homography.json>`을 실행합니다. 지도 이미지는 보정할 때와 같은 카메라 위치, 해상도, 크롭을 사용해야 합니다. 내부에서 cm 힌트를 픽셀로 바꿔 검출 영역과 매칭하며, 생성되는 의미 지도와 경로의 단위는 픽셀입니다.
-
-실물 지도는 `assets/maps/parking_map_real.png`와 `parking_map_real_labels.json`을 사용합니다. 라벨의 `buildings`와 `gates`에 각 검은색 사각형 안쪽의 힌트 좌표를 하나씩 지정합니다. 검은색 사각형은 서로 떨어져 있어야 하며, 각 힌트는 서로 다른 검출 영역에 연결되어야 합니다. 실물 사진의 파란색 주차칸에는 별도 밝기 하한을 적용하고, 검은색 시설 후보는 얇게 이어진 픽셀을 제거한 뒤 이미지 경계에서도 검출합니다.
-
-현재 데이터 단위는 **`pixel`**입니다. 지도상의 `weight`도 도로 중심선을 따른 픽셀 거리이므로 **실제 cm/m 거리로 해석하면 안 됩니다.** 실물 제작 후 카메라 캘리브레이션·월드 좌표계 정의·Homography를 적용하고, 변환된 좌표에서 간선 길이를 다시 계산할 예정입니다.
-
-바닥 평면의 Homography를 구하려면 `python -m src.map_processing.planar_calibration --image <사진> --points <기준점.json> --output <결과.json> --max-error-cm <허용오차>`를 실행합니다. 기준점 JSON에는 `map_id`, `paper_size_cm`의 [가로, 세로], `control_points`의 십자 4개(`id`, `pixel`, `world_cm`), `paper_corners_px`의 전지 모서리 4개를 넣습니다. 점 순서는 좌상단부터 시계 방향이고, 월드 원점은 전지 왼쪽 위입니다. 여덟 점으로 변환을 구하고, 한 점씩 제외해서 해당 점의 오차를 검사합니다. 검사에 실패하면 종료 코드는 1이며 결과 JSON에는 후보 행렬과 오차가 기록됩니다.
-
-### 다른 지도 테스트
-
-- 다른 지도는 이미지와 라벨 쌍을 `assets/maps/`에 추가한 뒤 `--map-id`로 선택합니다. 결과는 `data/maps/<map_id>/`에 저장됩니다.
-- 지도의 배치·크기가 바뀌면 해당 라벨 JSON의 위치 힌트를 갱신한 뒤 그래프를 다시 생성합니다.
-
-## 7. 검증 결과
-
-현재는 최신 OCR 사진의 힌트와 종이 바깥 배경 처리 결과를 기본 입력으로 사용합니다.
-사진의 P번호에 맞춰 ID를 재할당하고 픽셀 크기와 좌표는 유지했습니다. 상세 변경은 문서 상단을 참고하세요.
-
-| 검증 항목 | 실물 지도 |
-| --- | --- |
-| 그래프 노드 / 간선 | 14 / 13 |
-| 그래프 연결 | `True` |
-| 일반/장애인 주차칸 | 4 / 2 |
-| 건물/입출구 영역 | 2 / 2 |
-| 입구 노드 / 출구 노드 | `N3` / `N4` |
-| 경로 PNG / JSON | 5 / 5 |
-
-실행 결과 예시(실물 지도, 건물 B와 가까운 장애인석):
-
-```text
-Preference: building_b
-Selected: N5
-Score: 92.00
-Route: N3 -> N8 -> N10 -> N9 -> N11 -> N12 -> N2
-Route distance: 565.93
-```
-
-다섯 케이스의 선택 주차칸과 경로를 테스트하고, waypoint가 도로 영역 안에 있으며 인접 점 사이가 최대 대각선 1픽셀 간격인지 확인합니다. 테스트는 `archives/` 자료에 의존하지 않습니다.
-
-## 8. 개발 로드맵
-
-상세 체크리스트와 완료 기준은 **[docs/ROADMAP.md](docs/ROADMAP.md)**, 팀원별 책임은 **[docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md)**를 참고합니다. 지도·YOLO·로버 제어는 일부 작업을 **병렬 진행**합니다.
-
-| 작업 영역 | 다음 주요 목표 | 상태 |
-| --- | --- | --- |
-| 지도·경로 | 픽셀 경로에서 실측 좌표로 변환 | 실물 지도 다섯 케이스의 경로와 픽셀 waypoint 검증 |
-| YOLO 점유 인식 | 모델 학습·검증 → `parking_space_id`별 `free/occupied/unknown` 출력 | 팀원 담당 / 완료 여부 미확인 |
-| 로버 주행 | UNO Q 모터·ToF 제어 → waypoint 추종 및 안전 정지 | 팀원 담당 / 완료 여부 미확인 |
-| 실물·카메라 | 천장 카메라 보정 → ArUco → 공통 월드 좌표 | 협업 진행 예정 |
-| 시스템 통합 | 점유 상태 반영해 최적 빈칸 선택 → 실물 주행·도착 판정 | 후속 통합 |
-| 선택 확장 | OCR/Segmentation/VLM/LLM·칼만 필터 | 필수 기능 이후 |
-
-**지도·경로 담당 모듈의 실물 통합 이전 1차 완료 기준**은 지도에서 시설·도로를 분석하여 의미 그래프를 생성하고, 선택 조건에 따른 최단 경로를 **시각화 및 연속 waypoint 데이터로 제공**하는 것입니다.
-
-## 9. 현재 한계 및 개선 계획
-
-- **검출 규칙 의존:** 기존 지도에서 과다 검출을 줄이기 위해 연결 영역의 색상 픽셀 비율(최소 60%), 파란색 HSV 밝기 하한(150), 파란 영역 최소 면적(3,000px) 등의 보정을 적용했습니다. 해상도/색상/지도 형태 변화에 대한 일반화는 추가 검증이 필요합니다.
-- **도로/교차점 처리:** `31×31` 교차점 병합, 노드 주변 반경 등 경험적인 설정을 사용합니다. 밀접 교차점, 루프, 짧은 가지, 연결이 끊긴 지도에서는 오류가 날 수 있습니다.
-- **경로 좌표 연속성:** 픽셀 경로를 내보낼 때 노드 주변 간격을 직선으로 보간하고 도로 영역을 검사합니다. 실물 주행에는 월드 좌표 변환과 회전반경 검증이 필요합니다.
-- **주차칸 고유 ID:** 주차칸은 `(map_id, parking_space_id)`로 식별합니다. `N0`, `N1` 등의 그래프 노드 ID는 지도나 그래프를 다시 생성할 때 달라질 수 있습니다.
-- **점유 정보:** 모든 일반 주차칸이 비었다는 **테스트 가정**으로 선택합니다. YOLO 결과는 아직 반영하지 않았습니다. 장애인 주차칸은 일반 주차 조건에서 제외합니다.
-- **거리 의미 차이:** 출입구까지는 그래프 **도로 최단거리**, 건물까지는 건물 사각형 외곽의 **직선거리**를 사용합니다. 실제 출입문까지의 보행 거리는 아직 모델링하지 않았습니다.
-- **실물 좌표:** 월드 좌표와 로버 `(x, y, θ)` 추적/주행 제어는 아직 구현 전입니다.
-
-## 10. 협업 및 문서
-
-**GitHub 저장소:** <https://github.com/isthisit123/ai-valet-parking-rover>  
-**팀원 공통 시작 문서:** **[docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md)**  
-**Codex 공통 지침:** [AGENTS.md](AGENTS.md)
-
-### 기능별 역할
-
-| 담당 | 개발 범위 | 브랜치 예시 |
-| --- | --- | --- |
-| 지도·경로 | 의미 지도, 주차칸 고유 ID, 최단 경로, 시각화/waypoint | `feature/map-to-graph`, 후속 기능별 브랜치 |
-| YOLO 점유 인식 | 데이터 수집·학습, 차량/주차칸 인식, ID별 점유 상태 | `feature/parking-detection` |
-| 로버 주행 | UNO Q 모터·ToF 제어, 경로 추종, 안전 정지 | `feature/rover-control` |
-| 팀 공통 | 카메라·ArUco, Homography, 인터페이스, 통합 시연 | 협의한 기능 브랜치 |
-
-협업자는 초대 수락 후 저장소를 Clone하고, `main` 최신 상태에서 **자기 기능 브랜치**를 생성합니다. 변경 후 테스트·커밋·Push하고 **Pull Request로 `main`에 병합**하는 것을 권장합니다. 다른 담당자의 파일을 임의로 대폭 수정하거나 로컬 변경을 삭제하지 않습니다.
-
-### 팀 간 데이터 연결(협의용)
-
-1. **지도 팀 → YOLO 팀:** `(map_id, parking_space_id)`, 주차칸 bbox/중심, 연결 도로 노드. `P01`은 영구 주차칸 ID이고 `N2`는 변동 가능한 그래프 노드입니다.
-2. **YOLO 팀 → 경로 선택:** 주차칸별 `free / occupied / unknown` 상태, 관측 시각, 신뢰도. `unknown`과 오래된 데이터는 빈칸으로 단정하지 않습니다.
-3. **경로 팀 → 로버 팀:** 선택한 주차칸 ID, 월드 좌표 프레임/단위가 명시된 연속 waypoint. 현재 생성된 그래프의 `pixel` 거리 데이터를 실제 cm로 사용하면 안 됩니다.
-
-데이터 계약의 상세 **JSON 예시와 담당별 완료 기준**은 `TEAM_GUIDE.md`에 있습니다. 문서의 계약 예시는 아직 합의·구현이 완료된 API가 아닙니다.
-
-### 문서 역할
-
-- **[README.md](README.md)** — 전체 목표, 실제 구현 상태, 지도 규칙, 설치·실행법
-- **[docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md)** — 팀원 역할, 협업 절차, 모듈 연결 JSON 계약 초안
-- **[docs/ROADMAP.md](docs/ROADMAP.md)** — 지도/YOLO/로버/실물/통합의 병렬 개발 로드맵
-- **[docs/PROJECT_HANDOFF.md](docs/PROJECT_HANDOFF.md)** — 지도 처리 구현·과거 실행 로그·설계 이력
-- **[AGENTS.md](AGENTS.md)** — 팀 전체의 Codex 개발·Git 안전 규칙
-
-> **주의:** 2026-11-09 이전 지도 코드 기록과 이후 팀 협업 계획은 구분해야 합니다. Codex는 작업 시작 전에 반드시 실제 로컬 Git 상태/소스/JSON을 확인하고, 문서에만 근거하여 완료를 주장하거나 다른 팀원의 파일을 덮어쓰지 마세요.
+| ~~`parking_map_v1.png`를 기본 지도로 사용~~ | `parking_map_real.png`와 OCR 라벨을 사용 |
+| ~~새 사진마다 시설별 픽셀 힌트를 손으로 입력~~ | `scripts.generate_map`으로 자동 생성. 픽셀 `hint`와 실측 `hint_cm`은 필요한 경우 직접 지정 가능 |
+| ~~숫자 `1~6`만 인쇄해 OCR로 읽기~~ | `P1~P6`으로 표기 |
+| ~~이전 카메라 구역과 점유 파일 재사용~~ | 새 구도의 카메라 영역을 다시 지정. 이전 기록은 `archives/`에 보관 |
+
+점유 인식 설정은 [카메라 점유 설정](docs/TEAM_GUIDE.md#카메라-점유-설정)을 참고하세요. 테스트 명령은 `& $python -m unittest discover -s tests -v`입니다. 남은 팀별 작업은 [로드맵](docs/ROADMAP.md), 이전 구현과 실행 로그는 [인수인계 기록](docs/PROJECT_HANDOFF.md)에 있습니다.

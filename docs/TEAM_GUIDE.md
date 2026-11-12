@@ -1,268 +1,78 @@
-# TEAM_GUIDE.md — 팀 협업 및 모듈 통합 가이드
+# Q-ROVER 팀 통합 가이드
 
-### 2026-11-11 최신 OCR 표기 기준 ID/유형 갱신
+## 통합 기준 지도·점유·경로
 
-사용자 요청으로 A/B, P1~P6, EN/EX 사진을 기본 지도로 채택했습니다. 일반석은 P1/P2/P4/P5,
-장애인석은 P3/P6이며 ID는 각 인쇄 번호와 대응하는 `space_1`~`space_6`입니다.
-`id_assignment_revision`은 `ocr-p-labels-v1`이며 라벨/매핑 파일에 기록합니다.
-기존 물리 칸의 ID를 재할당한 변경이므로 옛 점유 스냅샷의 같은 문자열 ID를 새 칸으로 해석하면 안 됩니다.
-ParkingHaeven의 원본 ID 대응만 이관하고 새 구도의 영역 좌표가 없어 매핑을 무효화했습니다.
-`status: requires_new_camera_regions`인 매핑은 점유 재현에 사용할 수 없습니다.
-새 영역 JSON으로 변환/IoU를 검증한 후 다시 활성화해야 합니다.
+| 항목 | 기준 |
+| --- | --- |
+| 기본 지도 | `parking_map_real`. OCR 원본과 같은 해상도의 종이 바깥 처리 PNG 및 대응 라벨을 사용합니다. |
+| ID | A/B → `building_a`/`building_b`, EN/EX → `entrance`/`exit`, P1~P6 → `space_1`~`space_6`. P3·P6은 장애인석입니다. |
+| 지도 일치 | `map_id`, `id_assignment_revision`, `map_image_sha256`을 비교합니다. 현재 ID 버전은 `ocr-p-labels-v1`입니다. SHA-256은 **기준 지도 PNG**의 값입니다. |
+| 좌표 | 지도와 카메라 픽셀은 각각의 프레임에서 사용합니다. 주행의 원점은 전지 왼쪽 위, 단위는 cm, +x는 오른쪽, +y는 아래입니다. 각도는 오른쪽 0°, 시계 방향이 양수입니다. |
+| 점유 | 실제 관측 시각 기준 기본 TTL 5초, `free` 신뢰도 0.5 이상인 칸만 선택합니다. 오래되거나 누락된 칸은 `unknown`입니다. |
 
-### 2026-11-11 로컬 점유 소비 인터페이스 추가
+같은 물리적 칸의 ID는 유지하고, 인쇄 번호를 다시 붙여 ID를 바꾸면 버전을 올립니다. 내부 도로 노드 번호 `N…`는 다시 생성될 수 있습니다. 기본 지도의 사진이나 ID 버전이 바뀌면 의미 지도·ROI·보정·경로를 함께 확인하세요.
 
-`src/map_processing/occupancy.py`와 selector/visualizer의 선택적 `occupancy` 인자가
-3.2절의 `schema_version: 0.1-draft`를 소비합니다. 실제 지도 칸 ID는 `space_1`~`space_6`입니다.
-기존 JSON과 함수의 기본 동작은 보존하고, 점유 옵션 사용 시에만 최신 free 칸으로 제한합니다.
-TTL 기본 5초, free 점유 신뢰도 최소 0.5는 초기 통합 기준입니다. 생산자와 실측 검증 후 조정해야 합니다.
-누락·오래된 상태는 unknown이며, 중복/잘못된 ID는 오류입니다. 자세한 실행은 README를 참조합니다.
-학습 키트와 ParkingHaeven 파일은 변경하지 않았습니다. 외부 `parking_cars.onnx`를 기존
-OpenCV로 읽는 `src/parking_detection/onnx_occupancy.py`와 ROI 지정 도구를 추가했습니다.
-학습 사진 한 장에서 차량 3대 검출을 확인했습니다. ROI 미지정은 unknown, 검출 차량의
-ROI 겹침은 occupied, 검증된 빈 배경과의 일치는 free입니다. free 신뢰도는 배경 일치율이며
-차량 탐지 확률과 다릅니다. 실제 카메라 ROI 지정·빈 배경 확인 및 현장 정확도 검증은 남아 있습니다.
+## 담당과 전달물
 
-> **프로젝트:** [AI Valet Parking Rover](../README.md) · **작성 기준:** 2026-11-10  
-> 팀원과 Codex가 담당 범위, 공통 데이터 형식, GitHub 작업 방식을 공유하기 위한 문서.  
-> 아래 예시 소스 경로와 JSON 계약은 **권장안**으로, 실제 구현 전에 저장소 소스와 비교해야 한다.
+| 담당 | 다음 작업 | 전달물 |
+| --- | --- | --- |
+| 맵 제작팀 | HTTP PNG에 OCR 자동 생성 연결. 실제 카메라 구도로 시설·주차칸과 점유 검증. 새 지도에서 기준점 4개 실측. | 기준 PNG·라벨·의미 지도, 카메라 ROI와 빈 기준 사진, 최신 점유 JSON, 검증된 cm 경로 |
+| 주행팀 | 바퀴를 띄우고 모터·ToF·정지 시험. ArUco 위치를 같은 월드 좌표계로 연결한 뒤 짧은 직선부터 시험. | 위치/방향 입력, 모터 보정값, 장애물·통신·추적 유실 시 정지 기록, 도착 오차 |
 
-## 1. 최종 시스템 목표
+## 카메라 점유 설정
 
-**주차장 배치도 분석 → 빈 주차칸 인식 → 조건에 맞는 주차칸 선택 → 다익스트라 경로 계획 → 천장 카메라로 로버 위치 추적 → Q-ROVER 실제 주행**을 통합한다.
+먼저 카메라를 고정하고 빈 주차장 사진을 저장합니다. 아래 모델 경로와 카메라 번호는 장치에 맞춰 바꿉니다. ROI 설정 창에서 칸마다 네 모서리를 순서대로 클릭하고 Enter로 확정합니다. R은 다시 지정, Esc는 취소입니다.
 
-```text
-[사전 준비: 지도 이미지]                      [시연 중: 고정 천장 카메라]
-    │                                             ├─ YOLO / 주차칸 점유
-    ▼                                             └─ ArUco / 로버 현재 위치
-OpenCV 지도/시설 인식                                     │
-    ▼                                                     ▼
-도로 그래프 + 주차칸 고유 ID ────────┐       주차칸별 점유상태 + 로버 자세
-                                   ▼                 │
-                            빈 주차칸 필터링 ◀──────┘
-                                   ▼
-                          주차 조건 평가 + Dijkstra
-                                   ▼
-                          연속 waypoint / 월드 좌표
-                                   ▼
-                        경로 추종 제어 + 안전 정지
-                                   ▼
-                         Arduino UNO Q / Q-ROVER
+```powershell
+$python = ".\.venv\Scripts\python.exe"
+$model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Source\models\parking_cars.onnx'
+& $python -m src.parking_detection.onnx_occupancy --model $model --camera 1 --save-frame archives/occupancy_setup/empty.png --output archives/occupancy_setup/initial.json
+& $python -m src.parking_detection.configure_regions --image archives/occupancy_setup/empty.png --output archives/occupancy_setup/regions.json --verified-empty-reference
+& $python -m src.parking_detection.onnx_occupancy --model $model --camera 1 --regions archives/occupancy_setup/regions.json --empty-reference archives/occupancy_setup/empty.png --output archives/occupancy_setup/current.json
+& $python -m src.rover_control --points floor_points.json --occupancy archives/occupancy_setup/current.json --case 01_building_a
 ```
 
-현재 기본 지도 파이프라인은 구현·2개 단순 지도에서 실행 확인했지만, YOLO 점유 연결·ArUco·월드좌표·실주행 통합은 완료 여부가 확인되지 않았다. 아래를 실제 완료 로그에 맞춰 업데이트한다.
+`--verified-empty-reference`는 실제로 빈 사진을 확인한 뒤 사용합니다. 마지막 두 명령은 TTL 안에 이어 실행합니다. 현재 ROI와 일치하는 빈 배경이 없으면 차량 미검출을 `free`로 처리하지 않습니다. 카메라 위치·해상도·크롭이 바뀌면 ROI를 다시 잡습니다.
 
-## 2. 담당 업무와 완료 기준
-
-### A. 지도·경로 담당
-
-**목적:** 실제 주차칸을 안정적인 ID로 표현하고, 선택된 칸까지의 경로와 위치 데이터를 제공한다.
-
-**주요 파일(현재):**
-`src/map_processing/map_reader.py`, `graph_builder.py`, `graph_exporter.py`, `semantic_mapper.py`, `parking_selector.py`.
-
-**작업:**
-1. 색상 기반 시설/도로 검출과 그래프 생성의 기존 동작 유지.
-2. `P01` 같은 주차칸 **고유 ID** 부여; 지도별 매핑 설정, 주차칸 bbox·중심·연결 도로 노드 저장.
-3. 원본 및 테스트 지도에서 같은 칸의 ID가 유지되는지 확인. 노드 번호 변동 시에도 P-ID가 유지되어야 함.
-4. 지도 설정/파일/출력 분리 및 코드 리팩토링.
-5. 다익스트라 결과를 `edge.path`로 연결하여 경로 PNG와 연속 waypoint JSON 제공.
-6. 실물 제작 후 지도 픽셀→월드 좌표 변환, 거리 가중치 재계산.
-
-**완료 기준:** 지도 2종에서 시설 ID/경로 검증을 통과하고, 점유 데이터가 들어오면 `free` 상태 칸만 선택할 수 있으며, 로버 팀에 좌표계가 정의된 waypoint를 전달함.
-
-### B. YOLO 주차 점유 담당
-
-**목적:** 천장 카메라 영상에서 주차칸별 상태를 알려준다.
-
-**권장 파일(신규; 실제 팀이 정함):** `src/parking_detection/` 아래 모델 추론, 점유 매핑, 테스트 파일. 모델 확장자는 학습/배포 환경에 따라 `.pt`, `.onnx` 등이 될 수 있음.
-
-**작업:**
-1. 실제 설치할 천장 카메라 높이·시야·조명에 가까운 사진 촬영.
-2. `차량 탐지 + 주차칸 영역 매칭` 또는 `각 주차칸 ROI의 free/occupied 분류` 중 방식 결정.
-3. 빈칸, 차량 1대/여러 대, 다른 위치·방향·색, 다양한 조명과 오검출 사례 데이터 수집.
-4. 데이터 분리·라벨링·학습·검증. 비슷한 연속 프레임을 학습/평가 양쪽에 섞지 않기.
-5. 고정된 주차칸 ID 기준으로 `free/occupied/unknown` 출력. 시간·신뢰도·영상 좌표계 기록.
-6. 인식 실패, 차량이 아닌 장애물, 오래된 영상 등 예외 처리.
-
-**완료 기준:** 처음 보지 않은 배치에서 주차칸별 판정을 제공하고, 미검출을 무조건 `free`로 처리하지 않으며, 샘플 입력/출력과 시험 방법을 문서화함.
-
-### C. 로버 주행·제어 담당
-
-**목적:** 선택된 목적지까지 안전하게 이동하고 도착을 판정한다.
-
-**권장 파일(신규; 실제 팀이 정함):** `src/rover_control/` 또는 장치용 코드. Arduino UNO Q의 Python/MCU 코드 구조는 실제 사용 환경에서 확인.
-
-**작업:**
-1. 좌우 모터 제어, 속도·회전·정지, 통신 경로 테스트.
-2. Q-ROVER 크기·휠베이스/회전반경·엔코더 제공 여부, ToF 센서 위치 확인.
-3. 공통 월드 좌표의 waypoint 및 로버 자세 `(x,y,θ)`를 소비하는 인터페이스 정의.
-4. 경로 추종·회전 제어, 도착 허용 오차, 속도 제한 구현.
-5. ToF 장애물, ArUco 미인식, 통신 지연/두절, 급정지 및 수동 중단 시 **정지 우선**.
-6. 모형 주차장의 통로 폭/회전 공간 검증; 단순 중심선 경로가 실제 기구학적으로 가능한지 확인.
-
-**완료 기준:** 개별 주행/안전 테스트 후, 실측 월드좌표 경로에서 안정적으로 주행·정지하며 도착 오차를 기록함.
-
-### D. 통합 담당(팀 공통으로 배정)
-
-- **실물:** 약 636×939 mm 전지 사용 계획(미확정); 무광 색상 마커와 실제 지도 HSV 조정 필요. 실제 모형의 물리 크기와 도로 폭은 로버 실측 후 확정.
-- **카메라:** USB FHD 30fps 제품 검토 중(앱코 APC850 후보, 구매/확정 여부 미확인); 고정 설치·렌즈 왜곡 보정.
-- **공통 좌표:** 지도 이미지 픽셀, 카메라 이미지 픽셀, 월드 cm를 구별하고 각 변환을 검증.
-- **ArUco:** 마커 크기·로버 상단 높이·로버 중심으로부터 오프셋/회전 보정.
-- **통합:** 경로 선택과 점유/위치 데이터 갱신 주기, stale 처리, 통신 실패와 안전정지 기준 합의.
-
-## 3. 팀 간 데이터 계약 — 협의용 v0 (미구현 예시)
-
-> **중요:** 아래 JSON은 새 설계 **초안**이다. 현재 의미 지도는 `data/maps/<map_id>/semantic.json`에 저장한다. 아래 예시와 실제 파일의 스키마를 함께 확인하고, bbox는 **표기 순서와 좌표계**를 반드시 명시한다.
-
-### 3.1 지도 팀 → 공통 주차칸 목록
+## 점유 JSON
 
 ```json
 {
   "schema_version": "0.1-draft",
-  "map_id": "parking_map_v1",
-  "coordinate_frame": "map_pixel",
-  "parking_spaces": [
-    {
-      "parking_space_id": "P01",
-      "type": "normal",
-      "road_node_id": "N2",
-      "bbox_xywh_px": [120, 200, 60, 70],
-      "center_px": [150, 235]
-    }
-  ]
-}
-```
-
-- `parking_space_id`: **물리적 칸의 고유 ID**. 검출 순서나 도로 노드 번호만으로 정하지 않는다. 맵 교체/재처리 시 ID 유지 정책 필요.
-- `road_node_id`: 현재 그래프에서 접근할 노드. 지도 재처리 시 달라질 수 있음.
-- `bbox_xywh_px`: **지도 이미지 좌상단 원점**, `[x, y, width, height]`. (`xyxy` 포맷과 섞지 않기.)
-- 실제 물리 주차칸의 위치가 바뀐 경우 기존 ID 매핑이 유효한지 다시 승인해야 한다.
-
-### 3.2 YOLO 팀 → 점유 상태 (주차칸 ID 기준)
-
-```json
-{
-  "schema_version": "0.1-draft",
-  "map_id": "parking_map_v1",
-  "observed_at": "2026-11-10T15:00:00+09:00",
+  "map_id": "parking_map_real",
+  "id_assignment_revision": "ocr-p-labels-v1",
+  "map_image_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd",
+  "observed_at": "2026-11-12T10:00:00+09:00",
   "spaces": [
-    {"parking_space_id": "P01", "status": "occupied", "confidence": 0.96},
-    {"parking_space_id": "P02", "status": "free", "confidence": 0.91},
-    {"parking_space_id": "P03", "status": "unknown", "confidence": null}
+    {"parking_space_id": "space_1", "status": "occupied", "confidence": 0.96},
+    {"parking_space_id": "space_2", "status": "free", "confidence": 0.91}
   ]
 }
 ```
 
-- `status`: `free` / `occupied` / `unknown` 중 하나. 인식 누락·판단 불명·오래된 데이터 → `unknown`으로 취급하는 방향 권장.
-- `confidence`의 의미와 임계값은 팀이 합의해야 함. 차량 탐지 확률과 주차칸 점유 판정 신뢰도를 혼동하지 않는다.
-- `observed_at`은 시간대가 포함된 ISO 8601 형식을 권장. 갱신/만료 기준(TTL)은 통합 시 별도 확정.
-- **카메라 픽셀의 YOLO bbox와 지도 픽셀의 주차칸 bbox는 직접 겹침 계산하지 않는다.** 카메라 ROI/캘리브레이션/좌표 변환을 거쳐 매칭.
+시각은 예시입니다. 생산자가 실제 관측 시각을 넣고, 차량 탐지 점수와 칸 상태의 신뢰도를 구분합니다. 조건에 맞는 `free` 칸이 없으면 경로 생성이 중단됩니다. ~~ParkingHaeven의 이전 4:3 구역 매핑과 저장된 점유 boolean을 그대로 실시간 입력으로 사용~~하는 방식은 폐기했습니다. 새 웹 구역 JSON을 받아 현재 칸 ID와 다시 대조해야 합니다. 과거 저장 파일 재생은 오프라인 시험입니다.
 
-### 3.3 경로 팀 → 로버 팀 (캘리브레이션 후)
+## 경로와 로버 위치
+
+- 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
+- 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
+- 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
 
 ```json
-{
-  "schema_version": "0.1-draft",
-  "map_id": "parking_map_v1",
-  "destination_parking_space_id": "P02",
-  "coordinate_frame": "world",
-  "unit": "cm",
-  "waypoints": [
-    {"x": 15.0, "y": 20.0},
-    {"x": 25.0, "y": 20.0}
-  ],
-  "total_distance": 10.0
-}
+{"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}
 ```
 
-- **숫자는 설명용 예시**다. 현재 도로 그래프 간선 거리는 픽셀 단위이므로 위 JSON은 현시점 실제 로버 주행 명령이 아니다.
-- 월드 좌표의 원점, x/y 방향, ArUco/로버 중심 기준, θ의 단위(rad/deg), 마커 높이·오프셋을 명시한다.
-- 경로만으로 실제 주행이 보장되지 않는다. 로버 폭·회전반경·장애물을 고려해야 한다.
+추적을 잃으면 `{"type":"lost","map_id":"parking_map_real"}`을 보냅니다. UNO Q의 TCP 기본 포트는 `8765`입니다. 명령과 응답은 줄바꿈으로 구분하고, 로버는 명령 `seq`를 `applied_seq`로 확인합니다.
 
-### 3.4 로버 팀 → 상태 피드백 (추후 합의)
-
-제안 필드: `timestamp`, `pose`, `current_waypoint_index`, `motion_state` (`idle`, `moving`, `arrived`, `stopped`, `error`), `stop_reason`. **실제 API·통신 프로토콜은 아직 확정되지 않았다.**
-
-## 4. 통합 순서 및 의존 관계
-
-1. **지도 ID 고정:** 주차칸별 고유 ID/지도 영역/연결 노드 확인. YOLO 팀에 샘플 JSON 제공.
-2. **YOLO 독립 테스트:** 고정 카메라 영상→주차칸별 점유 JSON 출력. 처음엔 `mock_occupancy.json`으로 주차 선택 연결 테스트 가능.
-3. **경로 결과 계약:** 선택된 `parking_space_id`, 선택 당시 점유 상태, 픽셀 waypoint와 단위/프레임 확인.
-4. **실물 캘리브레이션:** 지도/카메라 좌표를 같은 월드 좌표로 변환. 최소 4개 바닥 기준점, 왜곡 보정, 실제 측정 오차 검증.
-5. **주행 제어 통합:** 월드 waypoint와 로버 pose 연결, ToF/통신 두절/마커 미검출 정지 검증.
-6. **전체 시연:** 비어 있는 칸 선택→경로 계획→주행→도착→점유 상태 변경에 따른 재계획 시연.
-
-## 5. GitHub 협업 절차
-
-**저장소:** <https://github.com/isthisit123/ai-valet-parking-rover>  
-**접근:** 개인 저장소 Collaborators 초대 후 **수락**해야 쓰기 권한으로 push 가능. GitHub 정책·브랜치 보호에 따라 `main` 직접 push나 병합은 제한될 수 있다.
-
-### 5.1 처음 참여하는 팀원
-
-```powershell
-git clone https://github.com/isthisit123/ai-valet-parking-rover.git
-cd ai-valet-parking-rover
-git status -sb
-git branch -a
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+```jsonl
+{"type":"drive","seq":1,"linear_cm_s":6.0,"angular_deg_s":-20.0}
+{"type":"status","applied_seq":1,"state":"moving"}
+{"type":"stop","seq":2,"reason":"goal_reached"}
+{"type":"status","applied_seq":2,"state":"stopped"}
 ```
 
-Clone은 원격 브랜치 정보를 가져오지만 보통 **기본 브랜치(main)만 로컬에 체크아웃**한다.
+배선·모터 보정·정지 조건은 [UNO Q 수신 앱](../apps/q_rover_receiver/README.md)을 참고합니다. 실주행은 실측 보정과 위치·정지 시험 후 출발점 근처의 짧은 직선부터 진행합니다.
 
-### 5.2 담당 브랜치 만들기
+## Git 작업
 
-```powershell
-git switch main
-git pull --ff-only origin main
-# 아래 이름은 담당 기능에 맞게 선택
-git switch -c feature/parking-detection
-```
-
-- 지도: 기존 `feature/map-to-graph` 또는 단계별 신규 브랜치
-- YOLO: `feature/parking-detection`
-- 로버: `feature/rover-control`
-- 공유 캘리브레이션: `feature/camera-calibration` 등 **팀 합의 후** 생성
-
-브랜치가 이미 원격에 있으면 `git fetch origin` 후 `git switch <브랜치명>`으로 추적 브랜치를 체크아웃한다. 같은 이름의 브랜치를 중복 생성하지 않는다.
-
-### 5.3 수정 → 검증 → PR
-
-```powershell
-git status
-git diff
-# 본인이 변경한 파일만 선택적으로 stage 권장
-git add <수정한-파일>
-git commit -m "feat: describe your feature"
-git push -u origin HEAD
-```
-
-GitHub에서 `base: main`, `compare: 본인 브랜치`로 Pull Request 생성 → 영향 모듈 담당자 리뷰 → 테스트 결과 확인 후 병합. **Codex는 명시적인 요청 없이 commit/push/merge를 실행하지 않는다.**
-
-**PR 설명 템플릿:** 목적 / 변경 파일 / 실행 명령 / 테스트 결과 / 데이터 계약 변경 여부 / 위험 및 다음 작업.
-
-### 5.4 충돌 및 의존성 관리
-
-- 같은 파일(특히 `semantic_mapper.py`, `parking_selector.py`, `requirements.txt`)을 여러 팀원이 동시에 수정해야 한다면 **담당자를 정하고 PR 단위로 순차 반영**한다.
-- 합의되지 않은 스키마 변경은 먼저 이 문서/샘플 데이터로 제안하고, 소비자 팀에서 검토 후 반영한다.
-- `.venv`, API 키, 대용량 학습 데이터/모델 파일은 원칙적으로 Git에 올리지 않는다. 모델 공유 위치·릴리스 방식은 별도 정한다.
-- 오래된 `main`으로 작업을 시작한 경우 무작정 force push하지 말고, `git fetch origin`, 최신 브랜치 차이 확인 후 병합/리베이스 방식을 팀과 합의한다.
-
-## 6. 팀별 첫 실행 확인
-
-| 담당 | 첫 점검 | 남겨야 할 결과 |
-|---|---|---|
-| 지도 | `python -m src.map_processing.graph_exporter` → `semantic_mapper` → `parking_selector` | 그래프 수/시설 수/선택 경로 로그, 주차칸 ID 결과 |
-| YOLO | 정지 이미지 한 장을 모델에 넣어 추론 | bbox/분류 결과, 카메라 좌표계, 주차칸 ID별 상태 예시 |
-| 로버 | 바퀴를 들어 올린 상태에서 모터·정지·ToF 확인 | 제어 입력 및 실제 바퀴 반응, 정지 로그 |
-| 통합 | 카메라 4모서리 기준점 및 ArUco 검출 | 각 좌표계/초점/검출 안정성/실측 오차 |
-
-아직 완성되지 않은 모듈에는 위 실행 명령이 존재하지 않을 수 있다. **없는 파일이나 명령이 이미 구현된 것처럼 설명하지 않는다.**
-
-## 7. 완료 보고 형식
-
-작업을 마치면 PR 또는 팀 공유 글에 **무엇을 바꿨는지, 어떤 입력으로 시험했는지, 측정값/출력 JSON이 무엇인지, 무엇이 실패했는지, 다른 팀이 다음에 받아야 할 것이 무엇인지** 적는다. 팀원은 자신의 기능을 완성했다고 표시하기 전에 다른 기능과 공유하는 JSON 스키마를 확인한다.
-
-**참고:** 기본 기능 완성 후에만 OCR/VLM/LLM, 칼만 필터, 학습 기반 지도 Segmentation 등을 선택적으로 추가한다.
+담당 기능 브랜치는 최신 `main`에서 분기하고, 기능별로 테스트한 뒤 PR을 올립니다. 팀원에게는 변경 목적, 실행 명령·결과, 영향받는 데이터 규칙, 남은 실물 확인을 전달합니다. 모델·카메라 원본·실행 로그·`archives/`는 로컬에서 관리합니다.

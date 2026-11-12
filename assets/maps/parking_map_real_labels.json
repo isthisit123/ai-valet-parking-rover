@@ -4,15 +4,15 @@
     {
       "id": "building_a",
       "hint": [
-        314.5,
-        460.0
+        310.5,
+        472.0
       ]
     },
     {
       "id": "building_b",
       "hint": [
         985.5,
-        234.25
+        233.5
       ]
     }
   ],
@@ -20,70 +20,70 @@
     {
       "id": "entrance",
       "hint": [
-        299.5,
-        315.0
+        296.5,
+        327.0
       ]
     },
     {
       "id": "exit",
       "hint": [
-        1071.75,
-        357.5
+        1070.0,
+        354.0
       ]
     }
   ],
   "parking_spaces": [
     {
       "id": "space_1",
-      "type": "normal",
       "hint": [
         455.0,
         217.0
-      ]
+      ],
+      "type": "normal"
     },
     {
       "id": "space_2",
-      "type": "normal",
       "hint": [
-        641.0,
-        225.0
-      ]
+        641.5,
+        224.5
+      ],
+      "type": "normal"
     },
     {
       "id": "space_3",
-      "type": "accessible",
       "hint": [
-        804.5,
-        238.5
-      ]
+        804.0,
+        238.0
+      ],
+      "type": "accessible"
     },
     {
       "id": "space_4",
-      "type": "normal",
       "hint": [
-        988.75,
+        986.5,
         485.5
-      ]
+      ],
+      "type": "normal"
     },
     {
       "id": "space_5",
-      "type": "normal",
       "hint": [
-        752.75,
-        473.0
-      ]
+        760.5,
+        484.0
+      ],
+      "type": "normal"
     },
     {
       "id": "space_6",
-      "type": "accessible",
       "hint": [
-        545.75,
-        469.75
-      ]
+        549.0,
+        478.0
+      ],
+      "type": "accessible"
     }
   ],
   "label_scheme": "A,B,P1-P6,EN,EX",
   "id_assignment_revision": "ocr-p-labels-v1",
   "image_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd",
-  "source_ocr_image_sha256": "06b6f889ee657ab98b73f38b93395ef38d977c4f4a5ea87663be7e050573a967"
+  "source_ocr_image_sha256": "11c848278e4840493db5a799cd71a1f48cc1418daf47c02bbdc8f8b5e60b50cd"
 }

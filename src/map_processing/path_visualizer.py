@@ -6,7 +6,8 @@ import numpy as np
 from .graph_builder import remove_small_components
 from .map_config import create_map_parser, get_map_config
 from .map_reader import detect_road_mask, load_map_image
-from .occupancy import load_occupancy
+from .map_identity import AXES, map_identity, require_map_identity
+from .occupancy import DEFAULT_OCCUPANCY_TTL, load_occupancy
 from .parking_selector import (
     PARKING_PREFERENCES,
     PARKING_TYPES,
@@ -69,9 +70,10 @@ def connect_waypoints(graph, node_route, road_mask):
 
 
 def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_type="normal",
-                     occupancy=None, max_age_seconds=5.0, now=None):
+                     occupancy=None, max_age_seconds=DEFAULT_OCCUPANCY_TTL, now=None):
     if map_data["unit"] != "pixel":
         raise ValueError("지도 위 경로는 픽셀 단위의 도로 그래프가 필요합니다.")
+    require_map_identity({"map_id": map_id}, map_data, "의미 지도")
 
     result = select_parking_from_map(
         map_data, graph, preference, parking_type=parking_type,
@@ -84,6 +86,7 @@ def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_
         raise ValueError(f"목적지 노드 {destination}의 주차칸 ID가 없습니다.")
 
     route_data = {
+        **map_identity(map_data),
         "map_id": map_id,
         "preference": preference,
         "parking_type": parking_type,
@@ -93,7 +96,7 @@ def build_route_data(map_id, map_data, graph, preference, road_mask, *, parking_
         "node_route": node_route,
         "coordinate_frame": "map_image",
         "origin": "top_left",
-        "axis_directions": {"x": "right", "y": "down"},
+        "axis_directions": AXES,
         "unit": result["unit"],
         "total_distance": result["route_distance"],
         "waypoints": [list(point) for point in connect_waypoints(graph, node_route, road_mask)],
@@ -171,10 +174,8 @@ def draw_route(image, graph, route_data):
 
 
 def export_routes(config, preferences=None, *, parking_type="normal",
-                  occupancy=None, max_age_seconds=5.0):
-    map_data, graph = load_parking_map(config.semantic_path)
-    if map_data.get("map_id", config.map_id) != config.map_id:
-        raise ValueError(f"선택한 지도와 의미 지도 JSON의 map_id가 다릅니다. {config.map_id}")
+                  occupancy=None, max_age_seconds=DEFAULT_OCCUPANCY_TTL, case_id=None):
+    map_data, graph = load_parking_map(config.semantic_path, config=config)
     image = load_map_image(config.image_path)
     road_mask = remove_small_components(detect_road_mask(image))
     output_dir = config.output_dir / "routes"
@@ -185,15 +186,19 @@ def export_routes(config, preferences=None, *, parking_type="normal",
         cases = tuple(
             (f"{preference}_{parking_type}", preference, parking_type) for preference in preferences
         )
-    for case_id, preference, case_parking_type in cases:
+    if case_id is not None:
+        cases = tuple(case for case in cases if case[0] == case_id)
+        if not cases:
+            raise ValueError(f"지정한 경로 케이스가 없습니다: {case_id}")
+    for route_id, preference, case_parking_type in cases:
         route_data = build_route_data(
             config.map_id, map_data, graph, preference, road_mask, parking_type=case_parking_type,
             occupancy=occupancy, max_age_seconds=max_age_seconds,
         )
-        route_data["case_id"] = case_id
+        route_data["case_id"] = route_id
         preview = draw_route(image, graph, route_data)
-        png_path = output_dir / f"{case_id}.png"
-        json_path = output_dir / f"{case_id}.json"
+        png_path = output_dir / f"{route_id}.png"
+        json_path = output_dir / f"{route_id}.json"
         success, encoded = cv2.imencode(".png", preview)
         if not success:
             raise OSError(f"경로 미리보기 PNG를 인코딩하지 못했습니다. {png_path}")
@@ -211,7 +216,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--parking-type", choices=PARKING_TYPES, help="단일 조건의 주차칸 유형")
     parser.add_argument("--occupancy", help="주차칸 ID 기반 점유 JSON 경로")
-    parser.add_argument("--occupancy-ttl", type=float, default=5.0, help="점유 유효 시간(초)")
+    parser.add_argument("--occupancy-ttl", type=float, default=DEFAULT_OCCUPANCY_TTL, help="점유 유효 시간(초)")
     args = parser.parse_args()
     if args.parking_type and not args.preference:
         parser.error("--parking-type은 --preference와 함께 지정하세요.")

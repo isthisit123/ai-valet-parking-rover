@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from src.map_processing.map_config import DEFAULT_MAP
+from src.map_processing.map_identity import map_identity
 from src.map_processing.parking_selector import load_parking_map
 from .onnx_occupancy import read_image, validate_regions
 
@@ -21,7 +22,7 @@ def main():
     args = parser.parse_args()
     if args.output.exists():
         parser.error("기존 설정을 보호합니다. 새 --output 경로를 지정하세요.")
-    map_data, _ = load_parking_map()
+    map_data, _ = load_parking_map(config=DEFAULT_MAP)
     image = read_image(args.image)
     reference = read_image(DEFAULT_MAP.image_path)
     for region in map_data["regions"]:
@@ -69,7 +70,7 @@ def main():
                     points.clear()
                 if key in (10, 13) and len(points) == 4:
                     config = {
-                        "map_id": map_data["map_id"], "coordinate_frame": "camera_image",
+                        **map_identity(map_data), "coordinate_frame": "camera_image",
                         "image_size_px": [width, height],
                         "empty_reference_verified": args.verified_empty_reference,
                         "spaces": regions + [{"parking_space_id": space_id, "polygon_px": list(points)}],

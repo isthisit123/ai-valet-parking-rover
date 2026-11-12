@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 
 from src.map_processing.map_config import BASE_DIR, get_map_config
+from src.map_processing.map_identity import map_identity
 from src.map_processing.map_reader import detect_road_mask, load_map_image
 from src.map_processing.graph_builder import remove_small_components
 from src.map_processing.occupancy import occupancy_states
@@ -51,7 +52,8 @@ def convert_export(payload, mapping):
     if len(set(target_ids)) != len(target_ids):
         raise ValueError("여러 원본 영역이 같은 주차칸 ID에 연결되어 있습니다.")
     return {
-        "schema_version": "0.1-draft", "map_id": mapping["map_id"],
+        "schema_version": "0.1-draft",
+        **map_identity({**mapping, "map_image_sha256": mapping.get("target", {}).get("image_sha256")}),
         "usage": "offline_test_only", "observed_at": None,
         "assumption": "내보낸 occupied boolean을 정적 테스트 정답으로 가정. 실제 관측 시각과 신뢰도는 알 수 없음.",
         "spaces": [
@@ -125,7 +127,7 @@ def run(source_path, mapping_path, output_dir, routes_dir):
     config = get_map_config(mapping["map_id"])
     if hashlib.sha256(config.image_path.read_bytes()).hexdigest() != mapping["target"]["image_sha256"]:
         raise ValueError("지도가 매핑 생성 당시와 다릅니다. 변환을 재확인하세요.")
-    map_data, graph = load_parking_map(config.semantic_path)
+    map_data, graph = load_parking_map(config.semantic_path, config=config)
     image = load_map_image(config.image_path)
     overlaps = validate_mapping(mapping, map_data, image)
     payload = json.loads(source_path.read_text(encoding="utf-8-sig"))

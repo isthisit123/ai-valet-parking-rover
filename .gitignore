@@ -23,3 +23,6 @@ Thumbs.db
 # HTTP로 받은 원본 카메라 사진과 회차별 맵 결과
 /data/http_map_captures/
 /data/ocr_building_tests/
+
+# 로버 미리보기와 실행별 결과
+/data/rover_runs/

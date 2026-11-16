@@ -145,6 +145,29 @@ def build_graph(skeleton, endpoints, junctions):
             path=path
         )
 
+    # 가까운 노드 영역끼리 맞닿으면 제거 후 도로 구간이 남지 않는다.
+    # 실제 중심선의 접촉만 간선으로 복원하고, 공간상 가까운 노드를 임의로 잇지 않는다.
+    touching = {
+        tuple(sorted((region_of[a], region_of[b])))
+        for a, b in pixel_graph.edges
+        if a in region_of and b in region_of and region_of[a] != region_of[b]
+    }
+    for a, b in sorted(touching):
+        pa = (graph.nodes[a]["x"], graph.nodes[a]["y"])
+        pb = (graph.nodes[b]["x"], graph.nodes[b]["y"])
+        a_pixels = [pixel for pixel, owner in region_of.items() if owner == a]
+        b_pixels = [pixel for pixel, owner in region_of.items() if owner == b]
+        subgraph = pixel_graph.subgraph(a_pixels + b_pixels)
+        start = min(a_pixels, key=lambda p: (math.dist(p, pa), p))
+        end = min(b_pixels, key=lambda p: (math.dist(p, pb), p))
+        pixel_path = nx.shortest_path(subgraph, start, end, weight="weight")
+        path = []
+        for point in [pa, *pixel_path, pb]:
+            if not path or point != path[-1]:
+                path.append(point)
+        length = sum(math.dist(p, q) for p, q in zip(path, path[1:]))
+        graph.add_edge(a, b, weight=round(length, 2), path=path)
+
     return graph
 
 

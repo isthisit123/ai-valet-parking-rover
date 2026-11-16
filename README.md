@@ -1,6 +1,6 @@
 # Q-ROVER — AI Valet Parking Rover
 
-지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. 현재 **로컬 PNG → OCR 힌트 → 의미 지도 → cm 경로 미리보기**를 검증했습니다. 실제 카메라 점유 연동과 로버 주행은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
+지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. 현재 **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 픽셀 경로**와 기본 지도의 **cm 경로 미리보기**를 검증했습니다. 실제 카메라 점유 연동과 로버 주행은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
 
 ## 기본 지도
 
@@ -58,9 +58,76 @@ $webRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\So
 & $python -m scripts.http_map_server --web-root $webRoot --port 8001
 ```
 
-[localhost:8001](http://localhost:8001)에서 **현재 화면 PNG 전송 · 맵 생성**을 누릅니다. 서버는 `POST /api/map-capture`로 원본 PNG를 받아, 기존 픽셀 힌트로 그래프·의미 지도·보고서를 `data/http_map_captures/<capture_id>/`에 저장합니다. 기준 사진과 같은 카메라 위치·줌·크롭이 필요합니다.
+[localhost:8001](http://localhost:8001)에서 **현재 화면 PNG 전송 · 맵 생성**을 누릅니다. 서버는 `POST /api/map-capture`로 원본 PNG를 받아 **로컬 명령과 같은 OCR 지도 생성**을 실행합니다. 고정 폴더 `data/http_map_captures/latest/`의 `source.png`, `labels.json`, `graph.json`, `graph_preview.png`, `semantic.json`, `report.json`을 검증 성공 시 덮어씁니다. OCR 기록도 `ocr/report.json`, `ocr/preview.png`의 고정 파일명으로 저장하며 회차 폴더를 누적하지 않습니다. 실패 원본·진단 자료는 고정 폴더 `last_failed/`만 갱신하고 직전 성공 `latest/`와 기본 지도는 보존합니다. 과거에 생성한 회차 폴더는 삭제하지 않습니다.
 
-HTTP의 현재 범위는 **기존 힌트로 의미 지도 생성까지**입니다. 새 캡처의 OCR 힌트 생성과 cm 경로 생성은 로컬 명령에 구현돼 있고, 웹 버튼에는 연결할 예정입니다.
+새 사진의 A/B, P1~P6, EN/EX를 읽으므로 이전 카메라 매핑·종횡비·외곽 좌표를 기본으로 재사용하지 않습니다. 입력 PNG의 크기·방향·바이트를 보존하며 원근 보정은 별도입니다. 주차장 전체와 이름표가 보여야 하고, 색상 영역 매칭도 통과해야 합니다. OCR Python은 `.venv-ocr`를 자동 선택하며 다른 환경은 `--ocr-python <Python 경로>`로 지정합니다. 예전 고정 구도 흐름이 필요한 경우에만 `--legacy-hints`를 명시합니다.
+
+전체 프레임에서 건물 이름표를 놓치면 검은 시설을 더 어두운 기준으로 재검출해 영역·글자 확대 OCR을 시도합니다. 회색 바닥과 시설이 합쳐져 B 영역이 누락되는 경우를 보완하며, 신뢰도 기준을 낮추거나 `8`을 B로 바꾸지는 않습니다. 실물 사진의 어두운 초록색 검출 기준은 디지털 지도와 별도로 관리합니다.
+
+서버 코드 변경 후에는 실행 중인 서버를 **Ctrl+C로 종료한 뒤 같은 명령으로 재실행**하고, 웹에서 **Ctrl+F5**를 누릅니다. 터미널에 `Generation: OCR (...)`, 웹에 새 사진의 OCR 안내가 표시되는지 확인하세요. 기본 OCR 모드에서는 지도 생성 후 아래 5개 경로도 자동 생성합니다. cm 보정·주행용 경로 변환은 별도입니다.
+
+### 웹에서 조건별 경로 확인
+
+같은 캡처의 PNG·라벨·의미 지도로 다음 조건을 계산합니다. 웹의 **조건별 경로**에서 선택된 주차칸과 거리(px)를 확인하고 **PNG 보기 / PNG 저장 / waypoint JSON 저장**을 누릅니다.
+
+| 조건 | 대상 주차칸 |
+| --- | --- |
+| A 건물 가까운 일반석 | 일반석 |
+| 장애인석 지정 | 장애인석 |
+| 출구 가까운 일반석 | 일반석 |
+| B 건물 가까운 장애인석 | 장애인석 |
+| 입구 가까운 장애인석 | 장애인석 |
+
+파일은 `data/http_map_captures/latest/routes/`의 같은 10개 PNG·JSON에 덮어쓰며, 5개 모두 도로 영역·좌표 연결 검사를 통과한 뒤 게시합니다. 경로 검증이 실패하면 이번 의미 지도는 `last_failed/`에서 확인할 수 있고 직전 성공 `latest/`는 유지합니다. 웹에 **지도 생성 성공 / 경로 검증 실패**를 구분해 표시하며 일부만 생성된 경로는 게시하지 않습니다. API 응답의 `route_generation.status`는 `generated` 또는 `failed`이며, 성공 시 `cases`에 조건·선택 칸·거리·waypoint 수·고정 PNG/JSON URL을 제공합니다. `capture_id`는 기록 식별자이며 폴더명으로 사용하지 않습니다. 실제 위치는 `output_directory`, 저장 구분은 `storage_key`를 사용하세요.
+
+이 경로는 **점유 미반영 정적 지도 시험**입니다. JSON의 `planning_mode`는 `static_map`, `occupancy_checked`는 `false`, 좌표는 원본 지도 픽셀입니다. 끝점은 주차칸에 연결된 도로 진입점(`waypoint_target: parking_road_node`)입니다. 실제 빈칸 선택과 주차칸 중앙 도착을 위한 점유·cm 보정·주행 검증은 후속 단계입니다.
+
+### 1단계: 수신 PNG로 로컬 OCR 지도 생성 검사
+
+웹 버튼이 OCR까지 자동 실행하므로 별도 검사 명령은 필수가 아닙니다. 실패한 회차를 로컬에서 다시 검사하려면 웹에 표시된 저장 폴더를 아래 `--capture-dir`에 넣습니다. 과거 힌트 매핑이 실패했더라도 `source.png`와 `report.json`이 저장됐다면 검사할 수 있습니다.
+
+```powershell
+& $python -m scripts.check_http_capture --capture-dir "data/http_map_captures/latest"
+```
+
+수신 보고서와 원본 PNG의 SHA-256·해상도를 대조한 뒤, 크기 변경이나 재인코딩 없이 같은 이미지로 기존 로컬 OCR 지도 생성을 실행합니다. 이름표 10개와 색상 시설 매핑을 모두 통과해야 성공입니다. 실제 영상에 주차장 전체와 A/B, P1~P6, EN/EX가 보이는지는 저장된 `source.png`와 OCR 미리보기로 확인하세요. 종이 바깥과 시설이 붙어 검출되면 **해당 PNG에서 확인한** 외곽 설정을 `--paper-preparation <파일>`로 지정할 수 있습니다.
+
+결과는 해당 캡처 폴더의 `ocr_check_<고유값>/`에 저장합니다. `report.json`에 입력 정보·실패 단계·오류 또는 시설 10개 매핑 결과가 기록되고, 성공하면 `labels.json`, `map/graph.json`, `map/graph_preview.png`, `map/semantic.json`이 생성됩니다. OCR 상세 기록·미리보기는 `ocr/`에 남습니다. 수신 파일과 기본 지도, 이전 검사 결과는 덮어쓰지 않습니다.
+
+## 로버 ArUco 위치·영상 방향각
+
+같은 HTTP 서버를 재시작하고 웹을 Ctrl+F5로 새로고침한 뒤 카메라를 켭니다. 기존 웹캠을 공유하며 별도 OpenCV 카메라 창은 열지 않습니다. 기본 사전은 `DICT_4X4_50`, 로버 ID는 사용자 사진에서 확인한 **7**, 전방은 마커의 **오른쪽 축(+x)**입니다. 웹의 ArUco 모듈은 서버에서 제공하므로 ParkingHaeven 원본 파일을 수정할 필요가 없습니다.
+
+```powershell
+& $python -m scripts.http_map_server --port 8001 --rover-marker-id 7 --aruco-period-ms 100
+```
+
+웹 아래 패널에 마커 중심 `(x, y)` 픽셀과 영상 방향각을 표시합니다. 원점은 원본 카메라 영상 왼쪽 위, +x 오른쪽·+y 아래, 각도는 오른쪽 0°·시계 방향 양수입니다. 마커를 다시 붙여 전방이 바뀌면 `--marker-front-offset-deg`로 마커 오른쪽 축에서 전방까지의 보정각을 지정하세요. 로버 ID·사전은 `--rover-marker-id`, `--aruco-dictionary`로 지정합니다.
+
+추천 기본 주기는 **100ms(10Hz)**입니다. PNG 전송·응답 시간을 포함해 다음 요청까지 남은 시간만 기다리며 요청은 중첩하지 않습니다. 새 비디오 프레임이 없으면 전송하지 않습니다. 실제 응답 간격과 검출 시간을 화면에 표시하며, 브라우저 왕복 지연이 200ms를 넘으면 현재 위치로 표시하지 않습니다. 노트북의 기존 주행 위치 만료 기준도 200ms입니다. 첨부 사진 한 장에서 검출 약 19ms를 확인했으며 실제 웹캠·YOLO 병행 시 목표 주기는 별도 실측해야 합니다.
+
+```powershell
+Invoke-RestMethod http://localhost:8001/api/rover-pose | ConvertTo-Json -Depth 6
+```
+
+`POST /api/aruco`가 검출하고 `GET /api/rover-pose`가 최신 상태를 반환합니다. `rover.center_px`, `rover.heading_deg`, `tracking_status`를 확인하세요. `detected`일 때만 현재 로버 값이 있으며 `lost`·`ambiguous`·`stale`에는 `rover: null`입니다. 서버가 프레임을 받은 지 200ms를 넘기면 GET에서 만료 처리합니다. JSON은 고정 파일 `data/rover_runs/aruco/latest.json`에 덮어쓰며 프레임 PNG를 누적 저장하지 않습니다. 파일을 직접 읽는 소비자는 같은 노트북의 `time.monotonic()`과 `received_monotonic_s`, `valid_for_ms`로 만료 여부를 직접 확인해야 합니다.
+
+현재 결과는 `coordinate_frame: camera_image`, `unit: pixel`인 **로버 상단 마커 중심·영상 방향각**입니다. `map_pose`는 `null`이며 월드 cm나 바닥 기준 로버 중심으로 사용하지 않습니다. 마커 높이·마커와 로버 중심의 오프셋·카메라/지도 보정을 확인한 뒤 기존 주행용 월드 cm·UDP 계약에 연결해야 합니다. 이 단계는 모터 명령을 보내지 않습니다. 마커 모서리 순서는 [OpenCV 문서](https://docs.opencv.org/4.x/d5/dae/tutorial_aruco_detection.html)를 따릅니다.
+
+## 픽셀 도착 판정 테스트
+
+서버 재시작·웹 Ctrl+F5 후 카메라를 켜고, 로버를 치운 상태에서 **맵을 1회 생성**합니다. 이번 기능은 카메라 연결 정보가 함께 저장돼야 하므로 업데이트 전의 지도는 한 번 다시 생성해야 합니다. 이후에는 지도 재생성 없이 마커 추적과 케이스 변경만 수행합니다.
+
+1. **로버 도착 판정 테스트**의 드롭다운에서 5개 조건 중 하나를 선택합니다. 조건 이름과 선택 주차칸(P1~P6)을 표시합니다.
+2. 지도 픽셀 기준 허용 반경을 지정하고 **테스트 시작**을 누릅니다. 기본 반경은 15px입니다. 노란 원이 목표 영역이며 하늘색 점은 판정용 마커 위치입니다.
+3. 로버를 수동으로 이동합니다. 선택한 경로의 **마지막 도로 진입점** 반경 안에서 1초 동안 위치가 안정되면 **성공 — 도착 판정 완료**가 표시됩니다. 안정성은 최초 관측점으로부터 `min(5px, 반경/3)` 이내이며, 최소 5개 관측이 필요합니다.
+4. 다음 케이스를 선택하면 기존 시험을 중단합니다. 새로 **테스트 시작**을 눌러 목표를 고정합니다. 성공은 다음 시작·중단·지도 변경까지 해당 시험의 완료 결과로 유지합니다.
+
+마커 미검출·중복·지연·200ms 관측 공백에는 유지 시간을 초기화합니다. 같은 프레임의 반복으로 시간을 채우지 않습니다. 새 지도 생성, 카메라 연결·해상도 변경은 기존 시험을 중단/무효화합니다. 영상과 지도 해상도가 달라도 동일 웹캠 세션·동일 구도·원본 전체 프레임인 경우 지도 픽셀로 비율 변환합니다. 카메라를 물리적으로 움직인 것은 자동 검출하지 못하므로 구도·줌·크롭은 유지하세요.
+
+`GET /api/arrival-tests`에서 케이스 목록, `POST /api/arrival-test/start`에서 `{case_id, capture_id, radius_px, hold_seconds}`로 시작, `POST /api/arrival-test/stop`에서 중단, `GET /api/arrival-test`에서 상태를 조회합니다. 웹은 상태를 약 250ms마다 표시하며 ArUco 입력은 기존 목표 100ms 주기를 사용합니다. 결과는 고정 JSON `data/rover_runs/arrival/latest.json`에 덮어씁니다. `coordinate_frame: map_image`, `unit: pixel`, `planning_mode: image_pixel_test`입니다.
+
+이 시험은 로버 상단 마커의 영상상 도착 여부만 확인합니다. 경로 전체를 주행했다는 판정이나 바닥 기준 주차 완료 판정은 수행하지 않으며, 모터 명령을 보내지 않습니다. 월드 cm·높이·로버 중심 보정과 실제 주행 검증은 별도입니다.
 
 ## 대체된 작업 방식
 

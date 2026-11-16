@@ -171,11 +171,19 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
         return records
     # 한 글자를 전체 프레임 검출기가 놓칠 때 색상 영역을 잘라 직접 읽는다.
     # 기존 함수만 재사용하며 힌트/기존 시설 위치는 입력하지 않는다.
-    from src.map_processing.semantic_mapper import detect_regions
-    from src.map_processing.map_config import REAL_MAP_ID
+    from src.map_processing.semantic_mapper import detect_regions, extract_dark_regions
+    from src.map_processing.map_config import REAL_DARK_RETRY_VALUE_LIMITS, REAL_MAP_ID
     normal, accessible, dark, _ = detect_regions(image, map_id=REAL_MAP_ID)
+    dark_ids = {*BUILDING_IDS, "entrance", "exit"}
+    recognized_ids = {identify_label(r["text"]) for r in records if r["score"] >= min_score}
+    if not dark_ids.issubset(recognized_ids):
+        # 회색 바닥과 붙어 기본 후보에서 탈락한 건물도 실제 검출 영역을 잘라 읽는다.
+        # 시설 매칭과 같은 재검출 기준을 사용하며, OCR로 읽은 ID만 채택한다.
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        for limit in REAL_DARK_RETRY_VALUE_LIMITS:
+            dark.extend(extract_dark_regions(hsv, closing=(13, 13), value_limit=limit))
     parking_ids = {f"space_{i}" for i in range(1, 7)}
-    groups = ((normal + accessible, parking_ids), (dark, {*BUILDING_IDS, "entrance", "exit"}))
+    groups = ((normal + accessible, parking_ids), (dark, dark_ids))
     for regions, allowed in groups:
         for region in regions:
             x, y, w, h = region["bbox"]

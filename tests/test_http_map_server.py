@@ -7,12 +7,17 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from scripts.http_map_server import decode_png, handler_for, prepare_paper_image, transform_hints
+from src.map_processing.map_reader import detect_road_mask
+from src.map_processing.graph_builder import remove_small_components
+from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES, connect_waypoints
 from src.map_processing.map_config import DEFAULT_MAP
+from scripts.ocr_buildings import LABEL_IDS
 
 
 class HttpMapServerTest(unittest.TestCase):
@@ -23,6 +28,10 @@ class HttpMapServerTest(unittest.TestCase):
         (web / "index.html").write_text('<html><body><canvas id="main-canvas"></canvas></body></html>')
         self.output = self.root / "captures"
         self.mapping_path = DEFAULT_MAP.image_path.with_name("parking_map_real_parkinghaeven_mapping.json")
+        labels = json.loads(DEFAULT_MAP.label_path.read_text(encoding="utf-8"))
+        self.hints = {item["id"]: item["hint"] for key in ("buildings", "gates", "parking_spaces")
+                      for item in labels[key]}
+        self.enterContext(patch("scripts.generate_map.run_ocr", side_effect=self.ocr_report))
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(web, self.output, DEFAULT_MAP.label_path, self.mapping_path))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -30,6 +39,20 @@ class HttpMapServerTest(unittest.TestCase):
         self.addCleanup(thread.join)
         self.addCleanup(server.shutdown)
         self.url = f"http://127.0.0.1:{server.server_port}"
+
+    def ocr_report(self, path, _python, output, _score):
+        body = path.read_bytes()
+        height, width = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_COLOR).shape[:2]
+        offset = 120 if height == 960 else 0
+        report = {"source_sha256": hashlib.sha256(body).hexdigest(), "image_size_px": [width, height],
+                  "status": "all_required_labels_recognized", "required_ids": list(LABEL_IDS.values()),
+                  "labels": [{"id": key, "status": "recognized", "center_candidate_px": [x, y + offset]}
+                             for key, (x, y) in self.hints.items()]}
+        # 실제 OCR과 동일한 기록 위치를 써서 실패 시 웹 진단 링크도 확인한다.
+        folder = output / "ocr_run"
+        folder.mkdir()
+        (folder / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        return report
 
     def post(self, body, content_type="image/png"):
         return urlopen(Request(self.url + "/api/map-capture", body,
@@ -42,16 +65,166 @@ class HttpMapServerTest(unittest.TestCase):
         with self.post(body) as response:
             report = json.load(response)
         self.assertEqual(report["status"], "map_generated")
+        self.assertEqual(report["generation_method"], "ocr")
         self.assertEqual(report["graph"], {"nodes": 14, "edges": 13, "connected": True})
         self.assertEqual(report["detected"]["normal"], 4)
         self.assertEqual(report["detected"]["accessible"], 2)
-        folder = self.output / report["capture_id"]
+        folder = Path(report["output_directory"])
         self.assertEqual((folder / "source.png").read_bytes(), body)
         semantic = json.loads((folder / "semantic.json").read_text(encoding="utf-8"))
         self.assertEqual(len(semantic["regions"]), 10)
+        self.assertEqual(semantic["map_image_sha256"], hashlib.sha256(body).hexdigest())
+        routes = report["route_generation"]
+        self.assertEqual(routes["status"], "generated")
+        self.assertEqual(routes["planning_mode"], "static_map")
+        self.assertFalse(routes["occupancy_checked"])
+        self.assertEqual(routes["unit"], "pixel")
+        self.assertEqual([case["case_id"] for case in routes["cases"]], [case[0] for case in DEFAULT_ROUTE_CASES])
+        road_mask = remove_small_components(detect_road_mask(cv2.imread(str(DEFAULT_MAP.image_path))))
+        nodes = {node["id"]: node for node in semantic["nodes"]}
+        for case in routes["cases"]:
+            with self.subTest(case=case["case_id"]):
+                with urlopen(self.url + case["files"]["waypoints"]) as response:
+                    route = json.load(response)
+                self.assertEqual(route["map_id"], semantic["map_id"])
+                self.assertEqual(route["map_image_sha256"], semantic["map_image_sha256"])
+                self.assertEqual(route["id_assignment_revision"], semantic["id_assignment_revision"])
+                self.assertEqual(route["planning_mode"], "static_map")
+                self.assertFalse(route["occupancy_checked"])
+                self.assertEqual(route["waypoint_target"], "parking_road_node")
+                points = np.asarray(route["waypoints"])
+                self.assertTrue(np.all(road_mask[points[:, 1], points[:, 0]]))
+                steps = np.linalg.norm(np.diff(points, axis=0), axis=1)
+                self.assertTrue(np.all((steps > 0) & (steps <= np.sqrt(2))))
+                self.assertEqual(nodes[route["start_node_id"]]["role"], "entrance")
+                self.assertEqual(nodes[route["destination_node_id"]]["role"], "parking_" + case["parking_type"])
+                with urlopen(self.url + case["files"]["preview"]) as response:
+                    self.assertEqual(cv2.imdecode(np.frombuffer(response.read(), np.uint8), cv2.IMREAD_COLOR).shape,
+                                     (720, 1280, 3))
         with urlopen(self.url + report["files"]["preview"]) as response:
             self.assertTrue(response.read().startswith(b"\x89PNG"))
         self.assertEqual(baseline, {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in baseline})
+
+    def test_repeated_success_overwrites_fixed_files_without_accumulating_folders(self):
+        old = self.output / "old_capture"
+        old.mkdir(parents=True)
+        (old / "keep.txt").write_text("historical capture")
+        with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+            first = json.load(response)
+        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+        frame[0, 0] = 254
+        _, encoded = cv2.imencode(".png", frame)
+        with self.post(encoded.tobytes()) as response:
+            second = json.load(response)
+        self.assertNotEqual(first["capture_id"], second["capture_id"])
+        self.assertEqual(first["output_directory"], second["output_directory"])
+        self.assertEqual(first["files"]["source"], "/captures/latest/source.png")
+        self.assertEqual(first["files"], second["files"])
+        self.assertEqual((self.output / "latest/source.png").read_bytes(), encoded.tobytes())
+        self.assertEqual({p.name for p in self.output.iterdir()}, {"latest", "old_capture"})
+        self.assertEqual({p.name for p in (self.output / "latest/ocr").iterdir()}, {"report.json"})
+        self.assertEqual(len(list((self.output / "latest/routes").iterdir())), 10)
+        self.assertEqual((old / "keep.txt").read_text(), "historical capture")
+
+    def test_failed_attempts_preserve_latest_and_replace_fixed_diagnostics(self):
+        with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+            success = json.load(response)
+        latest = Path(success["output_directory"])
+        before = {p.relative_to(latest): p.read_bytes() for p in latest.rglob("*") if p.is_file()}
+        for value in (255, 200):
+            _, encoded = cv2.imencode(".png", np.full((720, 1280, 3), value, np.uint8))
+            with self.assertRaises(HTTPError) as failure:
+                self.post(encoded.tobytes())
+            with failure.exception as response:
+                report = json.load(response)
+            self.assertTrue(report["latest_preserved"])
+            self.assertEqual(report["storage_key"], "last_failed")
+            self.assertEqual(report["files"]["source"], "/captures/last_failed/source.png")
+            self.assertEqual((self.output / "last_failed/source.png").read_bytes(), encoded.tobytes())
+            self.assertEqual(before, {p.relative_to(latest): p.read_bytes() for p in latest.rglob("*") if p.is_file()})
+            self.assertEqual({p.name for p in self.output.iterdir()}, {"latest", "last_failed"})
+
+    def test_publish_failure_rolls_back_previous_latest(self):
+        with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+            report = json.load(response)
+        latest = Path(report["output_directory"])
+        before = {p.relative_to(latest): p.read_bytes() for p in latest.rglob("*") if p.is_file()}
+        original = Path.rename
+
+        def fail_ready(path, target):
+            if path.name == "ready":
+                raise OSError("test publish failure")
+            return original(path, target)
+
+        with patch("scripts.http_map_server.Path.rename", new=fail_ready):
+            with self.assertRaises(HTTPError) as failure:
+                self.post(DEFAULT_MAP.image_path.read_bytes())
+        failure.exception.close()
+        self.assertEqual(before, {p.relative_to(latest): p.read_bytes() for p in latest.rglob("*") if p.is_file()})
+        self.assertEqual({p.name for p in self.output.iterdir()}, {"latest"})
+
+    def test_invalid_second_route_keeps_map_and_publishes_no_partial_routes(self):
+        calls = []
+
+        def fail_second(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                raise ValueError("경로 좌표가 검출된 도로 영역을 벗어났습니다. (261, 292)")
+            return connect_waypoints(*args)
+
+        with patch("src.map_processing.path_visualizer.connect_waypoints", side_effect=fail_second):
+            with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+                report = json.load(response)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(report["status"], "map_generated")
+        self.assertEqual(report["route_generation"]["status"], "failed")
+        self.assertIn("(261, 292)", report["route_generation"]["error"])
+        self.assertNotIn("cases", report["route_generation"])
+        folder = Path(report["output_directory"])
+        self.assertTrue((folder / "semantic.json").is_file())
+        self.assertFalse((folder / "routes").exists())
+        self.assertFalse(list(folder.glob(".route-build-*")))
+        with urlopen(self.url + report["files"]["semantic"]) as response:
+            self.assertEqual(json.load(response)["map_id"], DEFAULT_MAP.map_id)
+
+    def test_new_aspect_and_camera_frame_uses_new_ocr_without_old_mask(self):
+        frame = np.full((960, 1280, 3), 255, np.uint8)
+        frame[120:840] = cv2.imread(str(DEFAULT_MAP.image_path))
+        ok, encoded = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        body = encoded.tobytes()
+        with patch("scripts.http_map_server.transform_hints", side_effect=AssertionError("old hints used")), \
+                patch("scripts.http_map_server.prepare_paper_image", side_effect=AssertionError("old mask used")):
+            with self.post(body) as response:
+                report = json.load(response)
+        self.assertEqual(report["status"], "map_generated")
+        self.assertEqual(report["image_size_px"], [1280, 960])
+        folder = Path(report["output_directory"])
+        self.assertEqual((folder / "source.png").read_bytes(), body)
+        self.assertFalse((folder / "map.png").exists())
+        labels = json.loads((folder / "labels.json").read_text())
+        self.assertEqual(labels["buildings"][0]["hint"][1], self.hints["building_a"][1] + 120)
+
+    def test_missing_ocr_label_returns_error_without_reusing_old_hints(self):
+        original = self.ocr_report
+
+        def missing(*args):
+            report = original(*args)
+            report["status"] = "needs_review"
+            report["labels"][0]["status"] = "missing"
+            (args[2] / "ocr_run" / "report.json").write_text(json.dumps(report), encoding="utf-8")
+            return report
+
+        with patch("scripts.generate_map.run_ocr", side_effect=missing):
+            with self.assertRaises(HTTPError) as failure:
+                self.post(DEFAULT_MAP.image_path.read_bytes())
+        self.assertEqual(failure.exception.code, 422)
+        with failure.exception as response:
+            report = json.load(response)
+        self.assertIn("building_a(missing)", report["error"])
+        self.assertEqual(report["ocr"]["status"], "needs_review")
+        self.assertIn("ocr_report", report["files"])
+        self.assertNotIn("semantic", report["files"])
 
     def test_failed_mapping_is_reported_and_received_image_is_preserved(self):
         image = np.full((720, 1280, 3), 255, np.uint8)
@@ -63,7 +236,7 @@ class HttpMapServerTest(unittest.TestCase):
         report = json.load(failure.exception)
         self.assertEqual(report["status"], "failed")
         self.assertTrue(report["error"])
-        self.assertTrue((self.output / report["capture_id"] / "source.png").is_file())
+        self.assertTrue((Path(report["output_directory"]) / "source.png").is_file())
         self.assertNotIn("semantic", report["files"])
 
     def test_web_bridge_and_invalid_uploads(self):

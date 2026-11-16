@@ -15,7 +15,9 @@ from .map_config import (
     REAL_ACCESSIBLE_REGION,
     REAL_DARK_MIN_FILL_RATIO,
     REAL_DARK_OPEN_KERNEL_SIZE,
+    REAL_DARK_RETRY_VALUE_LIMITS,
     REAL_MAP_ID,
+    REAL_NORMAL_REGION,
     REGION_BORDER_MARGIN,
     REGION_CLOSE_KERNEL_SIZE,
     REGION_MAX_IMAGE_RATIO,
@@ -95,7 +97,7 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
     is_real_map = real_profile or map_id == REAL_MAP_ID
     accessible_region = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
     region_settings = (
-        (normal_region_for_map(REAL_MAP_ID if is_real_map else map_id), False),
+        (REAL_NORMAL_REGION if is_real_map else normal_region_for_map(map_id), False),
         (accessible_region, False),
         (BUILDING_REGION, is_real_map),
         (GATE_REGION, False),
@@ -221,7 +223,9 @@ def recover_dark_regions(image, regions, label_specs):
         return recovered
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    retries = ({"opening": (11, 11)}, {"closing": (13, 13), "value_limit": 110})
+    retries = ({"opening": (11, 11)}, *(
+        {"closing": (13, 13), "value_limit": limit} for limit in REAL_DARK_RETRY_VALUE_LIMITS
+    ))
     for settings in retries:
         # 이음새를 끊거나 밝은 글자로 갈라진 어두운 영역을 메운다.
         candidates = [region for region in extract_dark_regions(hsv, **settings) if hint_count(region) == 1]

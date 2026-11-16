@@ -5,12 +5,17 @@ import copy
 import hashlib
 import importlib.util
 import json
+import math
+import re
 import struct
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from shutil import copy2, copytree
+from tempfile import TemporaryDirectory
 from urllib.parse import unquote, urlsplit
 
 import cv2
@@ -20,11 +25,18 @@ import numpy as np
 from src.map_processing.graph_exporter import build_road_graph, save_graph
 from src.map_processing.map_config import BASE_DIR, DEFAULT_MAP, MapConfig
 from src.map_processing.semantic_mapper import detect_regions, map_semantics, mask_paper_background
+from src.map_processing.path_visualizer import export_routes
+from scripts.generate_map import default_ocr_python, generate_map as generate_ocr_map
+from src.rover_control.aruco_tracker import ArucoTracker
+from src.rover_control.arrival_test import ArrivalTest
 
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 8_000_000
 BRIDGE_PATH = Path(__file__).with_name("http_map_bridge.js")
+ARUCO_BRIDGE_PATH = Path(__file__).with_name("rover_aruco_bridge.js")
+ARRIVAL_BRIDGE_PATH = Path(__file__).with_name("rover_arrival_bridge.js")
+PUBLISH_LOCK = threading.RLock()
 
 
 def write_json(path, data):
@@ -84,7 +96,7 @@ def prepare_paper_image(image, preparation):
     return mask_paper_background(image, corners)
 
 
-def generate_map(body, output_root, *, labels_path=DEFAULT_MAP.label_path,
+def generate_legacy_map(body, output_root, *, labels_path=DEFAULT_MAP.label_path,
                  mapping_path=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json",
                  captured_at=None):
     image = decode_png(body)
@@ -143,7 +155,160 @@ def generate_map(body, output_root, *, labels_path=DEFAULT_MAP.label_path,
     return report
 
 
-def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=None):
+def export_capture_routes(config, capture_id):
+    """같은 캡처의 의미 지도만 사용하며, 5개 조건이 모두 통과한 결과를 게시한다."""
+    with TemporaryDirectory(prefix=".route-build-", dir=config.output_dir) as scratch:
+        staged = MapConfig(config.map_id, config.image_path, config.label_path, Path(scratch))
+        staged.semantic_path.write_bytes(config.semantic_path.read_bytes())
+        outputs = export_routes(staged)
+        cases = []
+        for png_path, json_path in outputs:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            data.update(planning_mode="static_map", occupancy_checked=False,
+                        waypoint_target="parking_road_node")
+            write_json(json_path, data)
+            base_url = f"/captures/{capture_id}/routes/"
+            cases.append({"case_id": data["case_id"], "preference": data["preference"],
+                          "parking_type": data["parking_type"], "parking_space_id": data["parking_space_id"],
+                          "total_distance": data["total_distance"], "waypoint_count": len(data["waypoints"]),
+                          "files": {"preview": base_url + png_path.name, "waypoints": base_url + json_path.name}})
+        # 한 조건이라도 실패하면 임시 결과를 정리하고 미완성 경로 링크를 노출하지 않는다.
+        (Path(scratch) / "routes").rename(config.output_dir / "routes")
+    return {"status": "generated", "planning_mode": "static_map", "occupancy_checked": False,
+            "coordinate_frame": "map_image", "unit": "pixel", "cases": cases}
+
+
+def _generate_map_attempt(body, output_root, *, labels_path=DEFAULT_MAP.label_path,
+                 mapping_path=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json",
+                 captured_at=None, ocr_python=None, min_score=0.75, legacy_hints=False,
+                 preparation_path=None, map_id=DEFAULT_MAP.map_id, camera_source=None):
+    if legacy_hints:
+        return generate_legacy_map(body, output_root, labels_path=labels_path,
+                                   mapping_path=mapping_path, captured_at=captured_at)
+    image = decode_png(body)
+    capture_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ_") + uuid.uuid4().hex[:8]
+    folder = output_root / capture_id
+    folder.mkdir(parents=True, exist_ok=False)
+    source = folder / "source.png"
+    source.write_bytes(body)
+    url = lambda name: f"/captures/{capture_id}/{name}"
+    report = {"capture_id": capture_id, "status": "failed", "generation_method": "ocr",
+              "map_id": map_id, "image_size_px": list(image.shape[1::-1]),
+              "received_at": datetime.now(timezone.utc).isoformat(), "client_captured_at": captured_at,
+              "output_directory": str(folder.resolve()), "source_sha256": hashlib.sha256(body).hexdigest(),
+              "files": {"source": url("source.png")}}
+    report["camera_source"] = camera_source
+    try:
+        # 로컬 PNG·웹캠과 같은 검증·임시 저장 처리를 재사용한다.
+        config = MapConfig(map_id, source, folder / "labels.json", folder)
+        generate_ocr_map(config, ocr_python or default_ocr_python(), min_score=min_score,
+                         ocr_output_root=folder / "ocr", preparation_path=preparation_path)
+        graph = json.loads(config.graph_path.read_text(encoding="utf-8"))
+        semantic = json.loads(config.semantic_path.read_text(encoding="utf-8"))
+        regions = semantic["regions"]
+        report.update(status="map_generated", map_image_sha256=semantic["map_image_sha256"],
+                      id_assignment_revision=semantic["id_assignment_revision"],
+                      graph={"nodes": len(graph["nodes"]), "edges": len(graph["edges"]), "connected": True},
+                      detected={"normal": sum(r.get("type") == "normal" for r in regions),
+                                "accessible": sum(r.get("type") == "accessible" for r in regions),
+                                "dark_candidates": sum(r["id"] in ("building_a", "building_b", "entrance", "exit")
+                                                       for r in regions)})
+        report["files"].update(labels=url("labels.json"), graph=url("graph.json"),
+                               preview=url("graph_preview.png"), semantic=url("semantic.json"))
+    except (ValueError, OSError, KeyError, TypeError, nx.NetworkXException, cv2.error) as exc:
+        report["error"] = str(exc)
+    if report["status"] == "map_generated":
+        try:
+            report["route_generation"] = export_capture_routes(config, capture_id)
+        except (ValueError, OSError, KeyError, TypeError, nx.NetworkXException, cv2.error) as exc:
+            # 의미 지도 생성 성공과 경로 검증 실패를 구분해 알려준다.
+            report["route_generation"] = {"status": "failed", "error": str(exc),
+                                          "planning_mode": "static_map", "occupancy_checked": False}
+    # 미인식일 때도 이름표별 상태와 미리보기를 웹에서 확인할 수 있게 한다.
+    for path in sorted((folder / "ocr").glob("*/*/report.json")):
+        ocr = json.loads(path.read_text(encoding="utf-8"))
+        report["ocr"] = {"status": ocr["status"], "labels": ocr["labels"]}
+        report["files"]["ocr_report"] = url(path.relative_to(folder).as_posix())
+        preview = path.with_name("preview.png")
+        if preview.is_file():
+            report["files"]["ocr_preview"] = url(preview.relative_to(folder).as_posix())
+    write_json(folder / "report.json", report)
+    return report
+
+
+def generate_map(body, output_root, **options):
+    """검증 성공 결과는 latest, 실패 진단은 last_failed의 고정 경로에 갱신한다."""
+    decode_png(body)  # 잘못된 요청은 출력 폴더도 만들지 않는다.
+    output_root = Path(output_root).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".http-build-", dir=output_root) as scratch:
+        scratch = Path(scratch)
+        report = _generate_map_attempt(body, scratch / "attempt", **options)
+        attempt = Path(report["output_directory"])
+        complete = report["status"] == "map_generated" and report.get("route_generation", {}).get("status") != "failed"
+        key = "latest" if complete else "last_failed"
+        target = output_root / key
+        pending = scratch / "ready"
+        pending.mkdir()
+        # 새로 생성한 자료만 복사해 이전 사진의 파일이 남지 않도록 한다.
+        for source in attempt.iterdir():
+            if source.name == "ocr":
+                continue
+            if source.is_dir():
+                copytree(source, pending / source.name)
+            else:
+                copy2(source, pending / source.name)
+        old_prefix = f"/captures/{report['capture_id']}/"
+        prefix = f"/captures/{key}/"
+
+        def fixed_urls(value):
+            if isinstance(value, dict):
+                return {k: fixed_urls(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [fixed_urls(v) for v in value]
+            if isinstance(value, str) and value.startswith(old_prefix):
+                return prefix + value[len(old_prefix):]
+            return value
+
+        report = fixed_urls(report)
+        # OCR 내부의 임시 회차 폴더도 게시하지 않고 고정 파일명으로 정리한다.
+        for path in (attempt / "ocr").glob("*/*/report.json"):
+            (pending / "ocr").mkdir(exist_ok=True)
+            copy2(path, pending / "ocr/report.json")
+            report["files"]["ocr_report"] = prefix + "ocr/report.json"
+            if path.with_name("preview.png").is_file():
+                copy2(path.with_name("preview.png"), pending / "ocr/preview.png")
+                report["files"]["ocr_preview"] = prefix + "ocr/preview.png"
+        report.update(storage_key=key, output_directory=str(target), published_as_latest=complete,
+                      latest_output_directory=str(output_root / "latest"))
+        with PUBLISH_LOCK:
+            if target.is_symlink() or target.resolve().parent != output_root:
+                raise ValueError("고정 결과 폴더가 지정한 출력 폴더 밖을 가리킵니다.")
+            report["latest_preserved"] = not complete and (output_root / "latest").is_dir()
+            write_json(pending / "report.json", report)
+            backup = scratch / "previous"
+            had_previous = target.exists()
+            if had_previous:
+                target.rename(backup)
+            try:
+                pending.rename(target)
+            except OSError:
+                if had_previous:
+                    backup.rename(target)
+                raise
+    return report
+
+
+def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=None, *,
+                ocr_python=None, min_score=0.75, legacy_hints=False, preparation_path=None,
+                map_id=DEFAULT_MAP.map_id, rover_marker_id=7, aruco_dictionary="DICT_4X4_50",
+                aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None):
+    tracker = ArucoTracker(marker_id=rover_marker_id, dictionary=aruco_dictionary,
+                           front_offset_deg=marker_front_offset_deg,
+                           output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json")
+    aruco_busy = threading.Lock()
+    arrival = ArrivalTest(output_root, marker_id=rover_marker_id, map_lock=PUBLISH_LOCK,
+                           output_path=arrival_output_path)
     base = SimpleHTTPRequestHandler
     if aruco_helper is not None and aruco_helper.is_file():
         # 기존 로컬 서버의 ArUco 기능을 그대로 사용한다.
@@ -170,25 +335,100 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
         def send_json(self, code, data):
             self.send_bytes(code, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
+        def camera_source(self):
+            return {"session_id": self.headers.get("X-Camera-Session", ""),
+                    "kind": self.headers.get("X-Source-Type", ""),
+                    "width": int(self.headers.get("X-Source-Width", "0")),
+                    "height": int(self.headers.get("X-Source-Height", "0"))}
+
         def do_GET(self):
             path = unquote(urlsplit(self.path).path)
             if path in ("/", "/index.html"):
                 html = (web_root / "index.html").read_text(encoding="utf-8")
-                html = html.replace("</body>", '<script src="/rover-map-bridge.js"></script></body>')
+                html = html.replace("</body>", '<script src="/rover-map-bridge.js"></script>'
+                                    '<script src="/rover-arrival-bridge.js"></script></body>')
                 self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/rover-map-bridge.js":
                 self.send_bytes(200, BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/js/ArUcoBridge.js":
+                self.send_bytes(200, ARUCO_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/rover-arrival-bridge.js":
+                self.send_bytes(200, ARRIVAL_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/api/arrival-tests":
+                self.send_json(200, arrival.catalog())
+            elif path == "/api/arrival-test":
+                self.send_json(200, arrival.current())
+            elif path == "/api/aruco-config":
+                self.send_json(200, {"marker_id": rover_marker_id, "dictionary": aruco_dictionary,
+                                     "period_ms": aruco_period_ms, "front_offset_deg": marker_front_offset_deg})
+            elif path == "/api/rover-pose":
+                self.send_json(200, {**tracker.current(), "arrival_test": arrival.current()})
             elif path.startswith("/captures/"):
-                file_path = (output_root / path.removeprefix("/captures/")).resolve()
-                if not file_path.is_relative_to(output_root.resolve()) or not file_path.is_file():
-                    self.send_error(404)
-                    return
+                with PUBLISH_LOCK:
+                    file_path = (output_root / path.removeprefix("/captures/")).resolve()
+                    if not file_path.is_relative_to(output_root.resolve()) or not file_path.is_file():
+                        self.send_error(404)
+                        return
+                    body = file_path.read_bytes()
                 content_type = "image/png" if file_path.suffix == ".png" else "application/json; charset=utf-8"
-                self.send_bytes(200, file_path.read_bytes(), content_type)
+                self.send_bytes(200, body, content_type)
             else:
                 super().do_GET()
 
         def do_POST(self):
+            path = urlsplit(self.path).path
+            if path in ("/api/arrival-test/start", "/api/arrival-test/stop"):
+                try:
+                    if path.endswith("/stop"):
+                        # 다음 keep-alive 요청과 섞이지 않도록 짧은 JSON 본문도 읽는다.
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 0 <= length <= 4096:
+                            raise ValueError("중단 요청 크기가 올바르지 않습니다.")
+                        self.connection.settimeout(2)
+                        self.rfile.read(length)
+                        self.send_json(200, arrival.stop())
+                        return
+                    if busy.locked():
+                        self.send_json(409, {"error": "지도 생성이 끝난 뒤 테스트를 시작하세요."})
+                        return
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if self.headers.get_content_type() != "application/json" or not 0 < length <= 4096:
+                        raise ValueError("테스트 시작에는 짧은 application/json 요청이 필요합니다.")
+                    self.connection.settimeout(2)
+                    options = json.loads(self.rfile.read(length))
+                    if not isinstance(options, dict):
+                        raise ValueError("테스트 설정은 JSON 객체여야 합니다.")
+                    self.send_json(200, arrival.start(options.get("case_id"), capture_id=options.get("capture_id"),
+                                                      radius_px=options.get("radius_px", 15),
+                                                      hold_seconds=options.get("hold_seconds", 1.0)))
+                except (ValueError, OSError) as error:
+                    self.send_json(400, {"error": str(error)})
+                return
+            if urlsplit(self.path).path == "/api/aruco":
+                if not aruco_busy.acquire(blocking=False):
+                    self.send_json(409, {"error": "이전 마커 프레임 처리 중입니다."})
+                    return
+                try:
+                    if self.headers.get_content_type() != "image/png":
+                        raise ValueError("마커 프레임은 image/png여야 합니다.")
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= MAX_UPLOAD_BYTES:
+                        raise ValueError("마커 PNG 크기는 1~12MiB 범위여야 합니다.")
+                    self.connection.settimeout(2)
+                    body = self.rfile.read(length)
+                    if len(body) != length:
+                        raise ValueError("마커 프레임 수신이 완료되지 않았습니다.")
+                    received = time.monotonic()
+                    result = tracker.observe(decode_png(body), received_monotonic_s=received,
+                                             client_captured_at=self.headers.get("X-Captured-At"),
+                                             frame_id=self.headers.get("X-Frame-Id"), camera_source=self.camera_source())
+                    result["arrival_test"] = arrival.observe(result)
+                    self.send_json(200, result)
+                except (ValueError, OSError, cv2.error) as error:
+                    self.send_json(400, {"error": str(error)})
+                finally:
+                    aruco_busy.release()
+                return
             if urlsplit(self.path).path != "/api/map-capture":
                 if base is not SimpleHTTPRequestHandler:
                     super().do_POST()
@@ -208,8 +448,11 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise ValueError("PNG 전송이 완료되지 않았습니다.")
+                arrival.stop("map_regeneration")
                 report = generate_map(body, output_root, labels_path=labels_path, mapping_path=mapping_path,
-                                      captured_at=self.headers.get("X-Captured-At"))
+                                      captured_at=self.headers.get("X-Captured-At"), ocr_python=ocr_python,
+                                      min_score=min_score, legacy_hints=legacy_hints,
+                                      preparation_path=preparation_path, map_id=map_id, camera_source=self.camera_source())
                 self.send_json(200 if report["status"] == "map_generated" else 422, report)
             except (ValueError, OSError) as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -227,14 +470,36 @@ def main():
     parser.add_argument("--mapping", type=Path, default=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json")
     parser.add_argument("--aruco-helper", type=Path, default=BASE_DIR.parent / "parking_training_kit/aruco_server.py")
     parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--ocr-python", type=Path, default=default_ocr_python(), help="OCR 전용 환경의 Python")
+    parser.add_argument("--min-score", type=float, default=0.75)
+    parser.add_argument("--map-id", default=DEFAULT_MAP.map_id)
+    parser.add_argument("--paper-preparation", type=Path, help="수신 PNG와 해시가 일치하는 종이 외곽 설정")
+    parser.add_argument("--legacy-hints", action="store_true", help="기존 구도용 힌트·외곽 설정 사용 (기본: 새 PNG의 OCR)")
+    parser.add_argument("--rover-marker-id", type=int, default=7)
+    parser.add_argument("--aruco-dictionary", default="DICT_4X4_50")
+    parser.add_argument("--aruco-period-ms", type=int, default=100)
+    parser.add_argument("--marker-front-offset-deg", type=float, default=0.0,
+                        help="마커 오른쪽 축에서 로버 전방까지의 보정각 (시계 방향 +)")
     args = parser.parse_args()
+    if not math.isfinite(args.min_score) or not 0 <= args.min_score <= 1:
+        parser.error("--min-score는 0~1 범위여야 합니다.")
+    if not 50 <= args.aruco_period_ms <= 1000 or not math.isfinite(args.marker_front_offset_deg):
+        parser.error("ArUco 주기는 50~1000ms, 전방 보정각은 유한한 숫자여야 합니다.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.map_id):
+        parser.error("--map-id에는 영문자, 숫자, 밑줄, 하이픈만 사용하세요.")
     if not (args.web_root / "index.html").is_file():
         parser.error("--web-root에 ParkingHaeven/Source 경로를 지정하세요.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    handler = handler_for(args.web_root.resolve(), args.output_dir.resolve(), args.labels, args.mapping, args.aruco_helper)
+    handler = handler_for(args.web_root.resolve(), args.output_dir.resolve(), args.labels, args.mapping, args.aruco_helper,
+                          ocr_python=args.ocr_python.resolve(), min_score=args.min_score, legacy_hints=args.legacy_hints,
+                          preparation_path=args.paper_preparation, map_id=args.map_id,
+                          rover_marker_id=args.rover_marker_id, aruco_dictionary=args.aruco_dictionary,
+                          aruco_period_ms=args.aruco_period_ms, marker_front_offset_deg=args.marker_front_offset_deg,
+                          arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"ParkingHaeven + PNG map: http://localhost:{server.server_port}", flush=True)
     print(f"Captures: {args.output_dir.resolve()}", flush=True)
+    print("Generation: " + ("legacy hints (fixed camera pose)" if args.legacy_hints else f"OCR ({args.ocr_python})"), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

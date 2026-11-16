@@ -19,6 +19,8 @@ ROAD_HSV_RANGES = (
 )
 # 초록색 주차칸을 검출하고 같은 색의 작은 범례는 면적으로 제외한다.
 NORMAL_REGION = ((45, 100, 100), (75, 255, 255), 1500)
+# 실물 촬영에서는 음영으로 어두워진 초록색도 같은 주차칸 후보로 검출한다.
+REAL_NORMAL_REGION = ((45, 100, 90), (75, 255, 255), 1500)
 TEST_NORMAL_REGION = ((0, 0, 245), (179, 55, 255), 1000)
 ACCESSIBLE_REGION = ((90, 70, 150), (135, 255, 255), 3000)
 # 웹캠 사진의 파란색 주차칸은 디지털 지도보다 어둡게 찍힌다.
@@ -30,6 +32,8 @@ REGION_CLOSE_KERNEL_SIZE = (3, 3)
 REAL_DARK_OPEN_KERNEL_SIZE = (7, 7)
 # 임시 완화: 그림자가 붙은 실물 입구 후보를 보존한다. 재검토 사항은 ROADMAP 참고.
 REAL_DARK_MIN_FILL_RATIO = 0.5
+# 회색 바닥과 검은 시설이 붙어 검출될 때만 적용하는 더 어두운 재검출 기준.
+REAL_DARK_RETRY_VALUE_LIMITS = (110, 100, 90)
 REGION_MAX_IMAGE_RATIO = 0.08
 REGION_BORDER_MARGIN = 1
 REGION_MIN_SIDE = 20

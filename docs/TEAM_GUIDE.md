@@ -16,10 +16,14 @@
 
 | 담당 | 다음 작업 | 전달물 |
 | --- | --- | --- |
-| 맵 제작팀 | HTTP PNG에 OCR 자동 생성 연결. 실제 카메라 구도로 시설·주차칸과 점유 검증. 새 지도에서 기준점 4개 실측. | 기준 PNG·라벨·의미 지도, 카메라 ROI와 빈 기준 사진, 최신 점유 JSON, 검증된 cm 경로 |
+| 맵 제작팀 | HTTP OCR 자동 생성은 연결됨. 실제 카메라 구도로 시설·주차칸과 점유 검증. 새 지도에서 기준점 4개 실측. | 기준 PNG·라벨·의미 지도, 카메라 ROI와 빈 기준 사진, 최신 점유 JSON, 검증된 cm 경로 |
 | 주행팀 | 바퀴를 띄우고 모터·ToF·정지 시험. ArUco 위치를 같은 월드 좌표계로 연결한 뒤 짧은 직선부터 시험. | 위치/방향 입력, 모터 보정값, 장애물·통신·추적 유실 시 정지 기록, 도착 오차 |
 
 ## 카메라 점유 설정
+
+HTTP 지도 생성은 `scripts.http_map_server`가 수신 PNG에서 OCR 힌트를 새로 생성합니다. 기존 카메라 종횡비나 수동 힌트·전지 외곽을 기본으로 재사용하지 않습니다. 검증된 결과는 고정 폴더 `data/http_map_captures/latest/`에 덮어쓰고, 실패 진단은 `last_failed/`만 갱신합니다. 실패 시 직전 성공 지도를 보존합니다. `capture_id`는 기록용이고 실제 폴더는 응답의 `output_directory`를 사용합니다. 생성한 지도를 기본 지도·ROI·보정·점유와 연결할 때는 위 지도 식별자와 사진 해시 계약을 별도로 맞춰야 합니다. 카메라 이동 후 기존 ROI를 그대로 사용하면 안 됩니다.
+
+기본 OCR 모드는 동일 캡처의 지도에서 5개 조건별 픽셀 경로도 생성합니다. 응답의 `route_generation`에 별도 성공/실패 상태와 결과 URL이 추가되며 기존 지도 필드는 유지합니다. 다운로드 JSON에도 동일한 지도 ID·사진 해시·ID 버전이 들어갑니다. `planning_mode: static_map`, `occupancy_checked: false`이며 실제 빈칸을 보장하지 않습니다. 끝점은 주차칸에 연결된 도로 노드입니다. 경로 실패 시 지도는 보존하고 미완성 경로는 게시하지 않습니다.
 
 먼저 카메라를 고정하고 빈 주차장 사진을 저장합니다. 아래 모델 경로와 카메라 번호는 장치에 맞춰 바꿉니다. ROI 설정 창에서 칸마다 네 모서리를 순서대로 클릭하고 Enter로 확정합니다. R은 다시 지정, Esc는 취소입니다.
 
@@ -54,6 +58,8 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
+현재 ArUco HTTP 입력은 위 주행용 월드 위치와 별개입니다. `POST /api/aruco`, `GET /api/rover-pose`에서 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀·영상 기준 각도로 제공합니다. 사용자 사진 기준 마커 +x가 전방이며 오른쪽 0°·시계 방향 양수입니다. 목표 전송은 100ms, 만료는 수신 후 200ms이고 미검출·중복·만료 시 `rover`는 `null`입니다. `received_monotonic_s`는 서버 프레임 수신 시각이며 카메라 노출 시각을 보장하지 않습니다. `map_pose: null`, `pose_status: calibration_required`인 이 데이터를 월드 cm UDP 입력으로 바로 사용하지 않습니다. 마커는 로버 상단에 있어 높이·로버 중심 오프셋·월드 변환 검증이 남아 있습니다.
+
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
@@ -74,5 +80,7 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 배선·모터 보정·정지 조건은 [UNO Q 수신 앱](../apps/q_rover_receiver/README.md)을 참고합니다. 실주행은 실측 보정과 위치·정지 시험 후 출발점 근처의 짧은 직선부터 진행합니다.
 
 ## Git 작업
+
+픽셀 도착 시험은 `GET /api/arrival-tests`, `POST /api/arrival-test/start`, `POST /api/arrival-test/stop`, `GET /api/arrival-test`를 사용합니다. 생성한 5개 경로의 마지막 도로 진입점을 선택하며 기본 반경 15px·안정 유지 1초·최소 5관측으로 판정합니다. `X-Camera-Session`, `X-Source-Type`, `X-Source-Width`, `X-Source-Height`를 지도 생성과 마커 입력에 함께 기록해 같은 웹캠 연결/해상도인지 확인합니다. 실제 물리적 구도는 별도 고정해야 합니다. 지도 버전/연결 변경 시 무효화하며 상단 마커 위치를 지도 픽셀로만 비율 변환합니다. 결과는 `data/rover_runs/arrival/latest.json`, `planning_mode: image_pixel_test`입니다. 이 성공은 주차 완료·경로 주행 성공·월드 cm 도착을 뜻하지 않으며 주행팀의 보정/제어 코드는 변경하지 않습니다.
 
 담당 기능 브랜치는 최신 `main`에서 분기하고, 기능별로 테스트한 뒤 PR을 올립니다. 팀원에게는 변경 목적, 실행 명령·결과, 영향받는 데이터 규칙, 남은 실물 확인을 전달합니다. 모델·카메라 원본·실행 로그·`archives/`는 로컬에서 관리합니다.

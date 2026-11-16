@@ -86,6 +86,38 @@ class BuildingOcrTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(next(r for r in records if r["text"] == "A")["box_kind"], "color_region_recognition")
 
+    def test_gray_floor_missing_building_is_recovered_from_new_dark_region(self):
+        image = np.full((300, 500, 3), 95, np.uint8)
+        image[30:81, 310:371] = 20
+        attempts = []
+
+        def engine(frame, **kwargs):
+            attempts.append(frame.shape)
+            if kwargs.get("use_det"):
+                return SimpleNamespace(txts=None)
+            return SimpleNamespace(txts=("B",), scores=(0.99,))
+
+        diagnostics = []
+        records = collect_records(engine, image, diagnostics=diagnostics)
+        self.assertEqual([r["text"] for r in records], ["B"])
+        self.assertEqual(records[0]["polygon_px"], [[310, 30], [370, 30], [370, 80], [310, 80]])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(diagnostics[0]["bbox_xywh_px"], [310, 30, 61, 51])
+
+    def test_dark_region_retry_does_not_guess_b_from_eight(self):
+        image = np.full((300, 500, 3), 95, np.uint8)
+        image[30:81, 310:371] = 20
+
+        def engine(frame, **kwargs):
+            if kwargs.get("use_det"):
+                return SimpleNamespace(txts=None)
+            return SimpleNamespace(txts=("8",), scores=(0.99,))
+
+        records = collect_records(engine, image)
+        report = analyze_records(records, [500, 300])
+        building_b = next(item for item in report["labels"] if item["id"] == "building_b")
+        self.assertEqual(building_b["status"], "missing")
+
     def test_bright_text_boxes_exclude_border_background(self):
         crop = np.zeros((90, 150, 3), np.uint8)
         crop[:, :10] = 255

@@ -33,6 +33,25 @@ OCR이 시설 10개의 좌표를 추출해 `assets/maps/parking_map_new_labels.j
 
 ## cm 경로 미리보기
 
+### 카메라에서 빨간 십자 자동 검출
+
+[기준점 설정](assets/maps/parking_map_real_markers.json)의 `markers_cm`에 십자 교차점의 실측 좌표를 한 번 입력합니다. 전지 왼쪽 위에서 오른쪽·아래쪽으로 잰 `[x, y]` cm를 씁니다. 전지와 십자의 배치가 그대로면 카메라를 바꿔도 이 값을 재사용합니다.
+
+- 현재 사진의 A는 입구 위, B는 출구 쪽 도로 위, C는 P4 오른쪽, D는 입구 쪽 도로 아래의 십자입니다. A~D가 외곽에서 왼쪽 위부터 시계 방향으로 보이도록 촬영하세요. 전지 전체가 화면에 들어오고 십자는 빨간 도로와 떨어져 있어야 합니다.
+- 기본 지도에서 확인점 E는 **P5로 연결되는 도로와 EN–EX 도로의 교점**입니다. 두 도로 중심선이 만나는 지점의 실측 `[x, y]` cm를 `junction_check.world_cm`에 입력합니다. `junction_check.parking_space_id`는 `space_5`입니다. 프로그램은 시설 ID와 도로 그래프로 교점의 픽셀 좌표를 찾고, A~D로 계산한 변환의 오차를 기본 1 cm 기준으로 확인합니다.
+- 다른 지도의 확인점은 `markers_cm.E`에 A~D 안쪽에 붙인 독립 빨간 십자의 실측 좌표로 지정할 수 있습니다. 확인점 설정을 생략하면 cm 추정 미리보기를 생성합니다.
+
+```powershell
+$python = ".\.venv\Scripts\python.exe"
+& $python -X utf8 -m src.rover_control --marker-layout assets/maps/parking_map_real_markers.json --camera 1
+```
+
+카메라 번호는 연결한 장치에 맞춥니다. 저장한 사진으로 실행할 때는 `--camera 1` 대신 `--image <카메라 PNG 경로>`를 지정합니다. `--calibration-only`로 보정 결과까지만 확인할 수 있고, 도로 교점 확인에는 이 옵션을 사용해도 OCR과 도로 그래프 처리가 필요합니다. 실행 폴더에는 촬영 PNG, 자동 검출한 `floor_points.json`, 보정 결과가 저장됩니다. 전체 실행에서 E 검증을 통과하면 같은 폴더의 `routes/`에 주행용 `*_cm.json`이 생성됩니다. 사진과 라벨 해시 검증에 필요한 파일들이므로 실행 폴더 구조를 함께 유지하세요.
+
+이번 촬영의 cm 지도는 터미널에 출력된 실행별 `cm_preview` 경로에서 확인합니다. 모든 경로가 생성되면 공용 cm 지도 폴더도 갱신됩니다. 기본 시설 인식에 실패하면 같은 사진에 어두운 영상용 색상 기준을 적용해 한 번 더 시도합니다. 실패 원인과 각 시도의 OCR 결과는 터미널과 실행별 `ocr` 폴더에 남습니다.
+
+### 등록된 PNG의 기존 보정 입력 사용
+
 ```powershell
 & $python -m src.rover_control --points floor_points.json
 ```

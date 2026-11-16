@@ -7,11 +7,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from src.map_processing.map_config import get_map_config
 from src.map_processing.map_identity import configured_map_identity, map_identity, require_map_identity
 from src.map_processing.planar_calibration import fit_floor_transform, load_world_to_image, project_points, quadrilateral
 from .route_preview import route_segments
-from .tracking import AXES, WORLD_ORIGIN, Route, parking_center_pixel
+from .tracking import AXES, WORLD_ORIGIN, Route, parking_center_pixel, route_map_config
 
 
 def read_json(path):
@@ -197,7 +196,7 @@ def main():
     args = parser.parse_args()
     try:
         route = read_json(args.route)
-        config = get_map_config(route["map_id"])
+        config = route_map_config(args.route, route["map_id"])
         source_image = config.image_path.read_bytes()
         image = cv2.imdecode(np.frombuffer(source_image, np.uint8), cv2.IMREAD_COLOR)
         if image is None:

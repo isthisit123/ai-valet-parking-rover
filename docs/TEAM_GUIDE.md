@@ -54,6 +54,8 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
+- 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
+
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.

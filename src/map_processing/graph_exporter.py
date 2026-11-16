@@ -6,6 +6,7 @@ from hashlib import sha256
 import cv2
 import networkx as nx
 import numpy as np
+from skimage.graph import route_through_array
 
 from .map_config import DEFAULT_MAP, ENDPOINT_RADIUS, JUNCTION_RADIUS, parse_map_config
 from .map_identity import AXES
@@ -14,10 +15,32 @@ from .graph_builder import (
     remove_small_components,
     create_skeleton,
     detect_nodes,
+    line_pixels,
 )
 
 
-def build_graph(skeleton, endpoints, junctions):
+def connect_to_node(road_mask, node, contact):
+    if road_mask is None or all(road_mask[y, x] for x, y in line_pixels(node, contact)):
+        return [node, contact]
+
+    # 굽은 교차로의 지름길이 도로 밖으로 나가면 노드 주변의 도로 안에서 다시 잇는다.
+    x, y = node
+    cx, cy = contact
+    height, width = road_mask.shape
+    if not road_mask[y, x] or not road_mask[cy, cx]:
+        raise ValueError(f"도로 연결점이 검출 영역 밖에 있습니다. {node} → {contact}")
+    margin = JUNCTION_RADIUS + 2
+    left, top = max(0, x - margin), max(0, y - margin)
+    right, bottom = min(width, x + margin + 1), min(height, y + margin + 1)
+    costs = np.where(road_mask[top:bottom, left:right], 1.0, np.inf)
+    try:
+        path, _ = route_through_array(costs, (y - top, x - left), (cy - top, cx - left))
+    except (ValueError, RuntimeError) as error:
+        raise ValueError(f"검출된 도로 안에서 연결할 수 없습니다. {node} → {contact}") from error
+    return [(px + left, py + top) for py, px in path]
+
+
+def build_graph(skeleton, endpoints, junctions, *, road_mask=None):
     # Skeleton의 모든 흰색 픽셀로 임시 그래프 생성
     pixel_graph = nx.Graph()
 
@@ -129,7 +152,9 @@ def build_graph(skeleton, endpoints, junctions):
             subgraph, start, end, weight="weight"
         )
 
-        path = [pa] + pixel_path + [pb]
+        from_node = connect_to_node(road_mask, pa, start)
+        to_node = connect_to_node(road_mask, pb, end)
+        path = from_node[:-1] + pixel_path + list(reversed(to_node[:-1]))
 
         # 중심선을 따라 이동한 거리 계산
         length = sum(
@@ -152,7 +177,7 @@ def build_road_graph(image_path=DEFAULT_MAP.image_path):
     road_mask = remove_small_components(get_road_mask(image_path))
     skeleton = create_skeleton(road_mask)
     endpoints, junctions = detect_nodes(skeleton)
-    graph = build_graph(skeleton, endpoints, junctions)
+    graph = build_graph(skeleton, endpoints, junctions, road_mask=road_mask)
     if not graph or not nx.is_connected(graph):
         raise ValueError(f"도로 그래프가 연결되어 있지 않습니다. 지도 {image_path}")
     return graph, skeleton

@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -23,6 +24,12 @@ TEST_NORMAL_REGION = ((0, 0, 245), (179, 55, 255), 1000)
 ACCESSIBLE_REGION = ((90, 70, 150), (135, 255, 255), 3000)
 # 웹캠 사진의 파란색 주차칸은 디지털 지도보다 어둡게 찍힌다.
 REAL_ACCESSIBLE_REGION = ((90, 70, 90), (135, 255, 255), 3000)
+# 어두운 실물 촬영에서는 칸의 밝기 하한을 낮추고 검은 시설은 배경보다 어두운 픽셀로 분리한다.
+LOW_LIGHT_NORMAL_REGION = ((45, 100, 60), (75, 255, 255), 1500)
+LOW_LIGHT_ACCESSIBLE_REGION = ((90, 70, 65), (135, 255, 255), 3000)
+LOW_LIGHT_BUILDING_REGION = ((0, 0, 0), (179, 255, 70), 1500)
+# 실물 사진의 픽셀 면적과 형태 처리에 사용한 기준 해상도다.
+REAL_REGION_REFERENCE_SIZE = (1280, 720)
 BUILDING_REGION = ((0, 0, 0), (179, 150, 120), 1500)
 GATE_REGION = ((0, 0, 150), (179, 85, 238), 1500)
 REGION_CLOSE_KERNEL_SIZE = (3, 3)
@@ -75,6 +82,12 @@ def available_map_ids():
         for path in MAPS_DIR.glob("*_labels.json")
         if (MAPS_DIR / f"{path.name.removesuffix('_labels.json')}.png").is_file()
     )
+
+
+def validate_map_id(map_id):
+    if not isinstance(map_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", map_id):
+        raise ValueError("map_id에는 영문자, 숫자, 밑줄, 하이픈만 사용할 수 있습니다.")
+    return map_id
 
 
 def map_paths(map_id, *, output_root=DEFAULT_OUTPUT_ROOT):

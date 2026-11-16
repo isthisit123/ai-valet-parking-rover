@@ -11,11 +11,15 @@ from .map_config import (
     BUILDING_REGION,
     DEFAULT_MAP,
     GATE_REGION,
+    LOW_LIGHT_ACCESSIBLE_REGION,
+    LOW_LIGHT_BUILDING_REGION,
+    LOW_LIGHT_NORMAL_REGION,
     OCR_LABEL_SCHEME,
     REAL_ACCESSIBLE_REGION,
     REAL_DARK_MIN_FILL_RATIO,
     REAL_DARK_OPEN_KERNEL_SIZE,
     REAL_MAP_ID,
+    REAL_REGION_REFERENCE_SIZE,
     REGION_BORDER_MARGIN,
     REGION_CLOSE_KERNEL_SIZE,
     REGION_MAX_IMAGE_RATIO,
@@ -77,30 +81,40 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False,
     return regions
 
 
-def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
+def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False, low_light=False):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
     is_real_map = real_profile or map_id == REAL_MAP_ID
-    accessible_region = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
+    height, width = image.shape[:2]
+    reference_width, reference_height = REAL_REGION_REFERENCE_SIZE
+    # 작은 웹캠 프레임에서 멀리 있는 시설도 후보로 남기도록 픽셀 기준을 줄인다.
+    area_scale = min(1.0, (width * height) / (reference_width * reference_height)) if is_real_map else 1.0
+    normal = normal_region_for_map(REAL_MAP_ID if is_real_map else map_id)
+    accessible = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
+    buildings = BUILDING_REGION
+    if is_real_map and low_light:
+        normal, accessible, buildings = LOW_LIGHT_NORMAL_REGION, LOW_LIGHT_ACCESSIBLE_REGION, LOW_LIGHT_BUILDING_REGION
     region_settings = (
-        (normal_region_for_map(REAL_MAP_ID if is_real_map else map_id), False),
-        (accessible_region, False),
-        (BUILDING_REGION, is_real_map),
-        (GATE_REGION, False),
+        (normal, False, 1.0),
+        (accessible, False, area_scale),
+        (buildings, is_real_map, area_scale),
+        (GATE_REGION, False, 1.0),
     )
     regions = []
-    for (lower, upper, min_area), is_real_dark in region_settings:
+    for (lower, upper, min_area), is_real_dark, scale in region_settings:
         mask = cv2.inRange(hsv, lower, upper)
         if is_real_dark:
             # 얇게 이어진 그림자를 끊고, 경계에 닿은 시설도 힌트 매칭 후보로 남긴다.
-            opening_kernel = np.ones(REAL_DARK_OPEN_KERNEL_SIZE, np.uint8)
+            radius = max(1, round((REAL_DARK_OPEN_KERNEL_SIZE[0] // 2) * math.sqrt(scale)))
+            side = 2 * radius + 1
+            opening_kernel = np.ones((side, side), np.uint8)
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, opening_kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         regions.append(
             extract_regions(
-                mask, min_area, image.shape, allow_border=is_real_dark,
+                mask, math.ceil(min_area * scale), image.shape, allow_border=is_real_dark,
                 min_fill_ratio=REAL_DARK_MIN_FILL_RATIO if is_real_dark else REGION_MIN_FILL_RATIO,
             )
         )
@@ -425,6 +439,7 @@ def create_semantic_map(
     output_path=DEFAULT_MAP.semantic_path,
     expected_map_id=None,
     calibration_path=None,
+    low_light=False,
 ):
     image = load_map_image(image_path)
     with open(graph_path, "r", encoding="utf-8") as f:
@@ -446,7 +461,7 @@ def create_semantic_map(
     real_profile = uses_real_map_profile(label_data)
     if "paper_corners_px" in label_data:
         image = mask_paper_background(image, label_data["paper_corners_px"])
-    detected = detect_regions(image, map_id=map_id, real_profile=real_profile)
+    detected = detect_regions(image, map_id=map_id, real_profile=real_profile, low_light=low_light)
     normal, accessible, buildings, gates = detected
     print("Normal spaces detected:", len(normal))
     print("Accessible spaces detected:", len(accessible))

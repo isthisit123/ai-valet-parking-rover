@@ -218,6 +218,35 @@ class ParkingIdsTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     semantic_mapper.map_semantics(graph_data, wrong_labels, detected)
 
+    def test_small_camera_frame_keeps_the_far_accessible_space(self):
+        image = np.full((480, 640, 3), 255, dtype=np.uint8)
+        blue = (130, 68, 33)
+        cv2.rectangle(image, (333, 125), (401, 162), blue, -1)
+        cv2.rectangle(image, (198, 233), (291, 300), blue, -1)
+        cv2.rectangle(image, (310, 330), (333, 353), blue, -1)
+
+        _, accessible, _, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+
+        self.assertEqual(
+            [region["bbox"] for region in accessible],
+            [[333, 125, 69, 38], [198, 233, 94, 68]],
+        )
+
+    def test_low_light_separates_dark_facility_from_floor_and_recovers_spaces(self):
+        hsv = np.full((480, 640, 3), (0, 0, 100), dtype=np.uint8)
+        hsv[80:140, 100:180] = (55, 200, 75)
+        hsv[160:220, 100:180] = (112, 230, 80)
+        hsv[80:140, 300:380] = (150, 255, 10)
+        image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        normal, accessible, buildings, _ = semantic_mapper.detect_regions(
+            image, map_id=REAL_MAP_ID, low_light=True,
+        )
+
+        self.assertEqual([region["bbox"] for region in normal], [[100, 80, 80, 60]])
+        self.assertEqual([region["bbox"] for region in accessible], [[100, 160, 80, 60]])
+        self.assertEqual([region["bbox"] for region in buildings], [[300, 80, 80, 60]])
+
     def test_real_map_preserves_geometry_routes_and_ids(self):
         output_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         for map_id, case in MAP_CASES.items():

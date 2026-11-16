@@ -154,7 +154,7 @@ def merge_overlapping_glyphs(records):
     return merged
 
 
-def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diagnostics=None):
+def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diagnostics=None, low_light=False):
     diagnostics = diagnostics if diagnostics is not None else []
     output = engine(image)
     records = []
@@ -168,7 +168,7 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
     # 기존 함수만 재사용하며 힌트/기존 시설 위치는 입력하지 않는다.
     from src.map_processing.semantic_mapper import detect_regions
     from src.map_processing.map_config import REAL_MAP_ID
-    normal, accessible, dark, _ = detect_regions(image, map_id=REAL_MAP_ID)
+    normal, accessible, dark, _ = detect_regions(image, map_id=REAL_MAP_ID, low_light=low_light)
     parking_ids = {f"space_{i}" for i in range(1, 7)}
     groups = ((normal + accessible, parking_ids), (dark, {*BUILDING_IDS, "entrance", "exit"}))
     for regions, allowed in groups:
@@ -215,7 +215,7 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
     return records
 
 
-def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region_fallback=True):
+def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region_fallback=True, low_light=False):
     if not math.isfinite(min_score) or not 0 <= min_score <= 1:
         raise ValueError("최소 OCR 신뢰도는 0~1 범위여야 합니다.")
     image_bytes = image_path.read_bytes()
@@ -229,13 +229,13 @@ def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region
     engine = RapidOCR(params={"Global.text_score": 0.0})
     diagnostics = []
     records = collect_records(engine, image, min_score=min_score, region_fallback=region_fallback,
-                              diagnostics=diagnostics)
+                              diagnostics=diagnostics, low_light=low_light)
     report = analyze_records(records, [image.shape[1], image.shape[0]],
                              min_score=min_score, buildings_only=buildings_only)
     report.update(engine="RapidOCR", source_file_name=image_path.name,
                   source_sha256=hashlib.sha256(image_bytes).hexdigest(),
                   processed_at=datetime.now(timezone.utc).isoformat(), region_fallback=region_fallback,
-                  region_attempts=diagnostics)
+                  region_attempts=diagnostics, low_light=low_light)
     folder = output_root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ_") + uuid.uuid4().hex[:8])
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -267,11 +267,13 @@ def main():
     parser.add_argument("--min-score", type=float, default=0.75, help="초기 실험 기준이며 현장 검증 필요")
     parser.add_argument("--buildings-only", action="store_true", help="현재 A/B만 붙였다면 두 건물만 필수로 검사")
     parser.add_argument("--no-region-fallback", action="store_true", help="색상 영역 보완 인식 없이 전체 이미지 OCR만 실행")
+    parser.add_argument("--low-light", action="store_true", help="어두운 실물 사진용 색상 영역 기준")
     parser.add_argument("--allow-single-letter", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         report = run(args.image, args.output_dir, min_score=args.min_score,
-                     buildings_only=args.buildings_only, region_fallback=not args.no_region_fallback)
+                     buildings_only=args.buildings_only, region_fallback=not args.no_region_fallback,
+                     low_light=args.low_light)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"OCR 실행 실패: {exc}\n")
     # 하나라도 누락/중복이면 결과는 남기고 성공 종료는 하지 않는다.

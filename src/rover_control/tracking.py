@@ -95,6 +95,18 @@ def parking_center_pixel(route_data, semantic):
     raise ValueError(f"도착 도로 노드에 연결된 주차칸 중심을 찾을 수 없습니다. {space_id}")
 
 
+def route_map_config(path, map_id):
+    from src.map_processing.map_config import MapConfig, get_map_config, validate_map_id
+
+    validate_map_id(map_id)
+    folder = path.parent.parent
+    image = folder / f"{map_id}.png"
+    labels = folder / f"{map_id}_labels.json"
+    if path.parent.name == "routes" and (image.exists() or labels.exists()):
+        return MapConfig(map_id, image, labels, folder)
+    return get_map_config(map_id)
+
+
 def load_route(path, calibration=None, goal_cm=None, *, require_verified=False):
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     map_id = data["map_id"]
@@ -106,39 +118,38 @@ def load_route(path, calibration=None, goal_cm=None, *, require_verified=False):
     frame = data["coordinate_frame"], data["unit"], data["origin"]
     if data["axis_directions"] != AXES:
         raise ValueError("경로 좌표축은 x 오른쪽, y 아래 방향이어야 합니다.")
+    config = None
     if require_verified and "parking_space_id" in data:
-        from src.map_processing.map_config import get_map_config
-
-        require_map_identity(configured_map_identity(get_map_config(map_id)), data, "주차 경로")
+        config = route_map_config(path, map_id)
+        require_map_identity(configured_map_identity(config), data, "주차 경로")
         if frame == ("world", "cm", WORLD_ORIGIN) and data.get("calibration_verified") is not True:
             raise ValueError("보정을 검증한 주차 경로 JSON이 필요합니다.")
     if frame == ("map_image", "pixel", "top_left"):
         if calibration is None:
             raise ValueError("픽셀 경로에는 검증된 --calibration JSON이 필요합니다.")
+        config = config or route_map_config(path, map_id)
         if "parking_space_id" in data:
-            from src.map_processing.map_config import get_map_config
-
             semantic_path = path.parent.parent / "semantic.json"
             if path.parent.name != "routes" or not semantic_path.is_file():
-                semantic_path = get_map_config(map_id).semantic_path
+                semantic_path = config.semantic_path
             semantic = json.loads(semantic_path.read_text(encoding="utf-8-sig"))
             require_map_identity(semantic, data, "픽셀 경로")
             points.append(parking_center_pixel(data, semantic))
-        points = pixel_to_world(map_id, points, calibration)
+        points = pixel_to_world(map_id, points, calibration, image_path=config.image_path)
     elif frame != ("world", "cm", WORLD_ORIGIN):
         raise ValueError("지원하는 경로는 지도 픽셀 또는 전지 좌상단 원점의 월드 cm입니다.")
     route = Route(map_id, points)
     return route if goal_cm is None else route.to_goal(goal_cm)
 
 
-def pixel_to_world(map_id, points, calibration):
+def pixel_to_world(map_id, points, calibration, *, image_path=None):
     import cv2
     import numpy as np
 
     from src.map_processing.map_config import get_map_config
     from src.map_processing.planar_calibration import load_world_to_image, project_points
 
-    image_bytes = get_map_config(map_id).image_path.read_bytes()
+    image_bytes = (image_path or get_map_config(map_id).image_path).read_bytes()
     image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("지도 이미지를 읽을 수 없습니다.")

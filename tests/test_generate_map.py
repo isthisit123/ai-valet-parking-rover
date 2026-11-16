@@ -8,9 +8,11 @@ from shutil import copyfile
 import sys
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from scripts.generate_map import generate_map
+import cv2
+
+from scripts.generate_map import capture_png, generate_map, read_camera_png
 from scripts.ocr_buildings import LABEL_IDS
 from src.map_processing.map_config import DEFAULT_MAP, MapConfig
 
@@ -72,3 +74,82 @@ class GenerateMapTest(unittest.TestCase):
                 self.assertEqual(self.config.label_path.read_bytes(), b"old labels")
                 self.assertEqual(self.config.semantic_path.read_bytes(), b"old map")
                 self.assertFalse(self.config.graph_path.exists())
+
+    def test_camera_capture_replaces_png_and_map_with_matching_hashes(self):
+        self.config.image_path.unlink()
+        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+
+        def report_for_capture(path, *_):
+            return {**self.report, "source_sha256": sha256(path.read_bytes()).hexdigest()}
+
+        with patch("scripts.generate_map.cv2.VideoCapture") as open_camera, \
+                patch("scripts.generate_map.capture_png", side_effect=lambda index: read_camera_png(index, cv2.CAP_DSHOW)), \
+                patch("scripts.generate_map.run_ocr", side_effect=report_for_capture), \
+                redirect_stdout(io.StringIO()):
+            camera = open_camera.return_value
+            camera.read.return_value = (True, frame)
+            generate_map(self.config, Path(sys.executable), camera_index=1, ocr_output_root=self.diagnostics)
+            old_image = self.config.image_path.read_bytes()
+            frame[0, 0] ^= 255
+            generate_map(self.config, Path(sys.executable), camera_index=1, replace=True,
+                         ocr_output_root=self.diagnostics)
+
+        self.assertEqual(open_camera.call_count, 2)
+        open_camera.assert_called_with(1, cv2.CAP_DSHOW)
+        self.assertEqual(camera.release.call_count, 2)
+        image_bytes = self.config.image_path.read_bytes()
+        self.assertNotEqual(old_image, image_bytes)
+        self.assertEqual(cv2.imread(str(self.config.image_path))[0, 0].tolist(), frame[0, 0].tolist())
+        digest = sha256(image_bytes).hexdigest()
+        labels = json.loads(self.config.label_path.read_text(encoding="utf-8"))
+        semantic = json.loads(self.config.semantic_path.read_text(encoding="utf-8"))
+        self.assertEqual(labels["image_sha256"], digest)
+        self.assertEqual(semantic["map_image_sha256"], digest)
+
+    def test_camera_or_ocr_failure_preserves_previous_png_and_results(self):
+        previous = {
+            self.config.image_path: self.config.image_path.read_bytes(),
+            self.config.label_path: b"old labels",
+            self.config.graph_path: b"old graph",
+            self.config.preview_path: b"old preview",
+            self.config.semantic_path: b"old map",
+        }
+        self.config.output_dir.mkdir()
+        for path, data in previous.items():
+            path.write_bytes(data)
+
+        with patch("scripts.generate_map.cv2.VideoCapture") as open_camera, \
+                patch("scripts.generate_map.capture_png", side_effect=lambda index: read_camera_png(index, cv2.CAP_DSHOW)), \
+                patch("scripts.generate_map.run_ocr", side_effect=ValueError("OCR failed")) as run_ocr, \
+                redirect_stdout(io.StringIO()):
+            camera = open_camera.return_value
+            camera.read.return_value = (False, None)
+            with self.assertRaisesRegex(OSError, "프레임을 읽지 못했습니다"):
+                generate_map(self.config, Path(sys.executable), camera_index=0, replace=True,
+                             ocr_output_root=self.diagnostics)
+            run_ocr.assert_not_called()
+
+            camera.read.return_value = (True, cv2.imread(str(self.config.image_path)))
+            with self.assertRaisesRegex(ValueError, "OCR failed"):
+                generate_map(self.config, Path(sys.executable), camera_index=0, replace=True,
+                             ocr_output_root=self.diagnostics)
+
+        self.assertEqual(camera.release.call_count, 2)
+        for path, data in previous.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_camera_timeout_stops_unresponsive_capture(self):
+        with patch("scripts.generate_map.get_context") as context_factory, redirect_stdout(io.StringIO()):
+            context = context_factory.return_value
+            receiver, sender = MagicMock(), MagicMock()
+            context.Pipe.return_value = (receiver, sender)
+            receiver.poll.return_value = False
+            process = context.Process.return_value
+            process.is_alive.return_value = True
+
+            with self.assertRaisesRegex(TimeoutError, "카메라 0번이 15초 동안 응답하지 않았습니다"):
+                capture_png(0)
+
+        receiver.recv.assert_not_called()
+        process.kill.assert_called_once()
+        process.close.assert_called_once()

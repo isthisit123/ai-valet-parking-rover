@@ -1,9 +1,10 @@
-"""지도 PNG에서 OCR 라벨, 도로 그래프, 의미 지도를 한 번에 생성한다."""
+"""지도 PNG 또는 웹캠에서 OCR 라벨, 도로 그래프, 의미 지도를 생성한다."""
 
 import argparse
 from contextlib import ExitStack
 from hashlib import sha256
 import json
+from multiprocessing import get_context
 from pathlib import Path
 import re
 import subprocess
@@ -23,6 +24,7 @@ from src.map_processing.semantic_mapper import create_semantic_map
 
 
 OCR_OUTPUT_ROOT = BASE_DIR / "data" / "ocr_building_tests"
+CAMERA_TIMEOUT_SECONDS = 15
 
 
 def labels_from_report(report, map_id, image_digest):
@@ -129,12 +131,83 @@ def publish_files(pairs, *, replace):
             raise
 
 
+def read_camera_png(camera_index, backend):
+    capture = cv2.VideoCapture(camera_index, backend)
+    frame = None
+    try:
+        if not capture.isOpened():
+            raise OSError(f"카메라 {camera_index}를 열 수 없습니다. 카메라 번호와 사용 중인 앱을 확인하세요.")
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # 자동 노출이 안정될 시간을 주고 마지막으로 읽은 프레임을 쓴다.
+        for _ in range(15):
+            ok, image = capture.read()
+            if ok and image is not None and image.size:
+                frame = image
+        if frame is None:
+            raise OSError(f"카메라 {camera_index}에서 프레임을 읽지 못했습니다.")
+    finally:
+        capture.release()
+
+    ok, encoded = cv2.imencode(".png", frame)
+    if not ok:
+        raise OSError("카메라 프레임을 PNG로 인코딩하지 못했습니다.")
+    height, width = frame.shape[:2]
+    print(f"카메라 {camera_index} 촬영 완료 ({width} × {height} px)", flush=True)
+    return encoded.tobytes()
+
+
+def camera_worker(camera_index, backend, sender):
+    with sender:
+        try:
+            png = read_camera_png(camera_index, backend)
+        except (OSError, cv2.error) as error:
+            sender.send((False, str(error)))
+        else:
+            sender.send((True, png))
+
+
+def capture_png(camera_index):
+    # Windows에서는 OpenCV 기본 방식으로 카메라를 여는 중 멈출 수 있다.
+    backend, name = (cv2.CAP_DSHOW, "DirectShow") if sys.platform == "win32" else (cv2.CAP_ANY, "OpenCV")
+    print(f"카메라 {camera_index} 여는 중 ({name})…", flush=True)
+
+    # 카메라 드라이버가 응답하지 않아도 지도 생성 명령을 종료할 수 있게 한다.
+    context = get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    with receiver, sender:
+        process = context.Process(target=camera_worker, args=(camera_index, backend, sender))
+        process.start()
+        sender.close()
+        try:
+            if not receiver.poll(CAMERA_TIMEOUT_SECONDS):
+                raise TimeoutError(f"카메라 {camera_index}번이 {CAMERA_TIMEOUT_SECONDS}초 동안 응답하지 않았습니다.")
+            try:
+                ok, result = receiver.recv()
+            except EOFError:
+                raise OSError(f"카메라 {camera_index} 촬영 프로세스가 중단되었습니다.") from None
+            if not ok:
+                raise OSError(result)
+            return result
+        finally:
+            process.join(0.5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            process.close()
+
+
 def generate_map(config, ocr_python, *, replace=False, min_score=0.75,
-                 ocr_output_root=OCR_OUTPUT_ROOT, preparation_path=None):
+                 ocr_output_root=OCR_OUTPUT_ROOT, preparation_path=None, camera_index=None):
     destinations = (config.label_path, config.graph_path, config.preview_path, config.semantic_path)
+    if camera_index is not None:
+        destinations += (config.image_path,)
     if not replace and any(path.exists() for path in destinations):
         raise FileExistsError(f"{config.map_id!r} 결과가 이미 있습니다. 갱신하려면 --replace를 사용하세요.")
-    image_bytes = config.image_path.read_bytes()
+    original_image = None
+    if camera_index is None or config.image_path.exists():
+        original_image = config.image_path.read_bytes()
+    image_bytes = original_image if camera_index is None else capture_png(camera_index)
     if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError(f"PNG 지도 이미지가 필요합니다: {config.image_path}")
     digest = sha256(image_bytes).hexdigest()
@@ -159,10 +232,23 @@ def generate_map(config, ocr_python, *, replace=False, min_score=0.75,
             label_path=staged.label_path, output_path=staged.semantic_path,
             expected_map_id=config.map_id,
         )
-        if sha256(config.image_path.read_bytes()).hexdigest() != digest:
-            raise ValueError("처리 중 지도 PNG가 바뀌었습니다. 현재 사진으로 다시 실행하세요.")
         sources = (staged.label_path, staged.graph_path, staged.preview_path, staged.semantic_path)
-        publish_files(zip(sources, destinations, strict=True), replace=replace)
+        if camera_index is not None:
+            sources += (staged.image_path,)
+
+        # 같은 지도를 동시에 생성해도 게시 단계에서 새 PNG와 결과 파일이 섞이지 않게 한다.
+        lock_dir = config.image_path.with_name(f".{config.image_path.stem}.publish-lock")
+        try:
+            lock_dir.mkdir()
+        except FileExistsError:
+            raise FileExistsError(f"{config.map_id!r} 지도 게시가 진행 중입니다. 잠시 후 다시 실행하세요.") from None
+        try:
+            current_image = config.image_path.read_bytes() if config.image_path.exists() else None
+            if current_image != original_image:
+                raise ValueError("처리 중 지도 PNG가 바뀌었습니다. 현재 사진으로 다시 실행하세요.")
+            publish_files(zip(sources, destinations, strict=True), replace=replace)
+        finally:
+            lock_dir.rmdir()
 
 
 def default_ocr_python():
@@ -176,22 +262,30 @@ def default_ocr_python():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--map-id", default=DEFAULT_MAP_ID, help="assets/maps/<지도 ID>.png의 지도 ID")
+    parser.add_argument(
+        "--camera", type=int, nargs="?", const=1, metavar="번호",
+        help="카메라로 촬영 (번호를 생략하면 1번, 옵션을 생략하면 저장된 PNG 사용)",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--ocr-python", type=Path, default=default_ocr_python(), help="OCR 환경의 Python 실행 파일")
     parser.add_argument("--paper-preparation", type=Path, help="배경과 시설이 붙어 보일 때 사용할 종이 외곽 JSON")
     parser.add_argument("--min-score", type=float, default=0.75)
-    parser.add_argument("--replace", action="store_true", help="검증 성공 시 같은 ID의 라벨·지도 결과 갱신")
+    parser.add_argument("--replace", action="store_true", help="검증 성공 시 같은 ID의 결과와 촬영 PNG 갱신")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.map_id):
         parser.error("--map-id에는 영문자, 숫자, 밑줄, 하이픈만 사용하세요.")
+    if args.camera is not None and args.camera < 0:
+        parser.error("--camera에는 0 이상의 카메라 번호를 입력하세요.")
     config = map_paths(args.map_id, output_root=args.output_dir.resolve())
     try:
         generate_map(
             config, args.ocr_python.resolve(), replace=args.replace, min_score=args.min_score,
-            preparation_path=args.paper_preparation,
+            preparation_path=args.paper_preparation, camera_index=args.camera,
         )
     except (OSError, ValueError, TypeError, KeyError, cv2.error) as error:
         parser.exit(1, f"지도 생성 실패: {error}\n")
+    if args.camera is not None:
+        print(f"촬영 PNG: {config.image_path}")
     print(f"라벨: {config.label_path}\n도로 그래프: {config.graph_path}\n의미 지도: {config.semantic_path}")
 
 

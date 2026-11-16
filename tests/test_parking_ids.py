@@ -164,6 +164,40 @@ class ParkingIdsTest(unittest.TestCase):
         )
         self.assertEqual(renamed.nodes[result["selected"]]["region_id"], "space_3")
 
+    def test_dark_region_retry_recovers_gates_without_changing_buildings(self):
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        image[70:110, 150:240] = 0
+        image[110:, 191:199] = 0
+        image[35:85, 30:90] = 0
+        image[100:140, 265:385] = 0
+        image[100:140, 317:327] = 255
+        labels = [{"id": "entrance", "hint": [195, 90]}, {"id": "exit", "hint": [322, 120]},
+                  {"id": "building_a", "hint": [60, 60]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        self.assertFalse(semantic_mapper.matching_region_indices(initial, labels[0]["hint"]))
+        self.assertFalse(semantic_mapper.matching_region_indices(initial, labels[1]["hint"]))
+
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        entrance, exit_region, building = semantic_mapper.assign_dark_facilities(recovered, labels)
+        self.assertEqual(entrance["bbox"], [150, 70, 90, 40])
+        self.assertEqual(exit_region["bbox"], [265, 100, 120, 40])
+        self.assertEqual(building["bbox"], initial[0]["bbox"])
+
+    def test_dark_region_retry_separates_facilities_joined_by_shadow(self):
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        image[40:90, 30:90] = 0
+        image[40:90, 130:190] = 0
+        image[65:73, 90:130] = 0
+        labels = [{"id": "building_a", "hint": [60, 65]}, {"id": "entrance", "hint": [160, 65]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        with self.assertRaisesRegex(ValueError, "이미 매핑된 검은색 영역"):
+            semantic_mapper.assign_dark_facilities(initial, labels)
+
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        building, entrance = semantic_mapper.assign_dark_facilities(recovered, labels)
+        self.assertEqual(building["bbox"], [30, 40, 60, 50])
+        self.assertEqual(entrance["bbox"], [130, 40, 60, 50])
+
     def test_real_map_matches_dim_blue_and_edge_touching_dark_facilities(self):
         image = np.full((300, 400, 3), 255, dtype=np.uint8)
         for x, y in ((30, 30), (310, 30), (30, 190), (339, 190)):

@@ -1,12 +1,13 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
 from scripts.ocr_buildings import (
     LABEL_IDS, analyze_records, bright_text_boxes, collect_records, group_text_boxes, identify_label,
-    merge_overlapping_glyphs,
+    merge_overlapping_glyphs, recognize_labels,
 )
 
 
@@ -37,6 +38,19 @@ class BuildingOcrTest(unittest.TestCase):
         report = analyze_records([record(text) for text in LABEL_IDS], [100, 100])
         self.assertEqual(report["status"], "all_required_labels_recognized")
         self.assertEqual(len(report["labels"]), 10)
+
+    def test_sideways_ocr_keeps_hint_coordinates_in_original_photo(self):
+        image = np.zeros((100, 200, 3), np.uint8)
+        for angle, failed_attempts, expected_center in ((90, 1, [20, 49]), (270, 2, [179, 50])):
+            with self.subTest(angle=angle):
+                records = [record(text) for text in LABEL_IDS]
+                with patch("scripts.ocr_buildings.collect_records", side_effect=[[]] * failed_attempts + [records]):
+                    report = recognize_labels(None, image, min_score=0.75, buildings_only=False,
+                                              region_fallback=True)
+                self.assertEqual(report["status"], "all_required_labels_recognized")
+                self.assertEqual(report["ocr_rotation_degrees"], angle)
+                self.assertEqual(report["image_size_px"], [200, 100])
+                self.assertEqual(report["building_labels"][0]["center_candidate_px"], expected_center)
 
     def test_missing_low_confidence_and_duplicate_labels_do_not_pass(self):
         for records, state in (([], "missing"), ([record("A", 0.5)], "low_confidence"),
@@ -106,7 +120,7 @@ class BuildingOcrTest(unittest.TestCase):
 
         def engine(frame, **kwargs):
             calls.append(frame.shape)
-            if not kwargs:
+            if kwargs.get("use_det"):
                 return SimpleNamespace(txts=None)
             if len(calls) == 2:
                 return SimpleNamespace(txts=("unreadable",), scores=(0.9,))

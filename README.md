@@ -31,6 +31,16 @@ OCR이 시설 10개의 좌표를 추출해 `assets/maps/parking_map_new_labels.j
 
 기존 기본 지도에서 시험하려면 `--map-id parking_map_real --replace`를 사용합니다. 종이 바깥과 검은 시설이 붙어 보이는 사진은 원본과 해시가 일치하는 외곽 설정을 자동 사용하거나 `--paper-preparation <파일>`을 지정합니다.
 
+### 웹캠으로 촬영하고 지도 생성
+
+주차장 전체와 시설 이름표가 카메라에 보이도록 맞춘 뒤 실행합니다. `--camera`만 입력하면 1번 카메라를 엽니다. 다른 카메라를 사용하려면 `--camera 0`처럼 번호를 지정합니다.
+
+```powershell
+& $python -m scripts.generate_map --camera --map-id parking_map_capture --replace
+```
+
+OpenCV가 촬영한 PNG로 OCR과 지도 생성을 실행합니다. Windows에서는 DirectShow로 카메라를 열고, 15초 동안 촬영이 완료되지 않으면 오류를 표시합니다. 검증에 성공하면 `assets/maps/parking_map_capture.png`, 대응 라벨 JSON과 `data/maps/parking_map_capture/`를 같은 이름으로 갱신합니다. 촬영이나 검증이 실패하면 직전 결과를 보존합니다.
+
 ## cm 경로 미리보기
 
 ```powershell

@@ -129,15 +129,19 @@ def group_text_boxes(boxes):
 
 
 def merge_overlapping_glyphs(records):
-    """같은 글자의 겹치는 그림자 후보만 병합한다. 떨어진 동일 ID는 중복으로 남긴다."""
+    """같은 위치에서 반복 인식한 ID를 병합한다. 떨어진 동일 ID는 중복으로 남긴다."""
     merged = []
     for record in sorted(records, key=lambda item: item["score"], reverse=True):
+        label_id = identify_label(record["text"])
+        if label_id is None:
+            merged.append(record)
+            continue
         points = np.asarray(record["polygon_px"])
         left, top = points.min(axis=0)
         right, bottom = points.max(axis=0)
         duplicate = None
         for other in merged:
-            if identify_label(record["text"]) != identify_label(other["text"]):
+            if label_id != identify_label(other["text"]):
                 continue
             other_points = np.asarray(other["polygon_px"])
             ox, oy = other_points.min(axis=0)
@@ -156,7 +160,8 @@ def merge_overlapping_glyphs(records):
 
 def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diagnostics=None):
     diagnostics = diagnostics if diagnostics is not None else []
-    output = engine(image)
+    # RapidOCR는 직전 호출에서 지정한 실행 모드를 유지한다.
+    output = engine(image, use_det=True, use_cls=True, use_rec=True)
     records = []
     if output.txts is not None and len(output.txts):
         for text, score, box in zip(output.txts, output.scores, output.boxes, strict=True):
@@ -194,25 +199,59 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
             for px, py, pw, ph in group_text_boxes(bright_text_boxes(crop)):
                 left, top = max(0, px-4), max(0, py-4)
                 right, bottom = min(w, px+pw+4), min(h, py+ph+4)
-                patch = cv2.resize(crop[top:bottom, left:right], None, fx=PATCH_UPSCALE,
-                                   fy=PATCH_UPSCALE, interpolation=cv2.INTER_CUBIC)
-                result = engine(patch, use_det=False, use_cls=False)
-                diagnostics.append({"kind": "bright_text_patch", "bbox_xywh_px": [x+px, y+py, pw, ph],
-                                    "texts": result.txts, "scores": result.scores})
-                if result.txts is None or len(result.txts) != 1:
-                    continue
-                text, score = result.txts[0], float(result.scores[0])
-                if identify_label(text) in allowed and score >= min_score:
-                    patches.append({"text": text, "score": score, "box_kind": "bright_text_patch",
-                                    "polygon_px": [[x+px, y+py], [x+px+pw-1, y+py],
-                                                   [x+px+pw-1, y+py+ph-1], [x+px, y+py+ph-1]]})
+                attempts = [("bright_text_patch", PATCH_UPSCALE)]
+                if 2 * pw < ph:
+                    # 비스듬히 촬영되어 폭이 좁아진 글자는 가로로 늘려 한 번 더 읽는다.
+                    attempts.append(("widened_text_patch", 2 * PATCH_UPSCALE))
+                for kind, scale_x in attempts:
+                    patch = cv2.resize(crop[top:bottom, left:right], None, fx=scale_x,
+                                       fy=PATCH_UPSCALE, interpolation=cv2.INTER_CUBIC)
+                    result = engine(patch, use_det=False, use_cls=False)
+                    diagnostics.append({"kind": kind, "bbox_xywh_px": [x+px, y+py, pw, ph],
+                                        "texts": result.txts, "scores": result.scores})
+                    if result.txts is None or len(result.txts) != 1:
+                        continue
+                    text, score = result.txts[0], float(result.scores[0])
+                    if identify_label(text) in allowed and score >= min_score:
+                        patches.append({"text": text, "score": score, "box_kind": kind,
+                                        "polygon_px": [[x+px, y+py], [x+px+pw-1, y+py],
+                                                       [x+px+pw-1, y+py+ph-1], [x+px, y+py+ph-1]]})
+                        break
             # 한 시설 안에서 서로 다른 ID가 읽히면 어느 쪽도 자동 확정하지 않는다.
             if len({identify_label(item["text"]) for item in patches}) <= 1:
-                records.extend(merge_overlapping_glyphs(patches))
+                records.extend(patches)
             elif patches:
                 diagnostics.append({"kind": "conflicting_patch_labels", "bbox_xywh_px": [x, y, w, h],
                                     "candidates": patches})
-    return records
+    return merge_overlapping_glyphs(records)
+
+
+def recognize_labels(engine, image, *, min_score, buildings_only, region_fallback):
+    height, width = image.shape[:2]
+    orientations = ((0, None), (90, cv2.ROTATE_90_CLOCKWISE), (270, cv2.ROTATE_90_COUNTERCLOCKWISE))
+    best_report, best_count = None, -1
+    for angle, rotation in orientations:
+        view = image if rotation is None else cv2.rotate(image, rotation)
+        diagnostics = []
+        records = collect_records(engine, view, min_score=min_score, region_fallback=region_fallback,
+                                  diagnostics=diagnostics)
+        # OCR만 회전시킨다. 힌트와 미리보기 좌표는 원본 PNG 좌표로 되돌린다.
+        for record in records:
+            points = record["polygon_px"]
+            if angle == 90:
+                record["polygon_px"] = [[y, height - 1 - x] for x, y in points]
+            elif angle == 270:
+                record["polygon_px"] = [[width - 1 - y, x] for x, y in points]
+        report = analyze_records(records, [width, height], min_score=min_score, buildings_only=buildings_only)
+        report.update(ocr_rotation_degrees=angle, region_attempts=diagnostics,
+                      region_attempts_coordinate_frame="ocr_view")
+        if report["status"] == "all_required_labels_recognized":
+            return report
+        recognized_count = sum(item["status"] == "recognized" and item["id"] in report["required_ids"]
+                               for item in report["labels"])
+        if recognized_count > best_count:
+            best_report, best_count = report, recognized_count
+    return best_report
 
 
 def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region_fallback=True):
@@ -227,15 +266,11 @@ def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region
     except ImportError as exc:
         raise RuntimeError("OCR 전용 .venv-ocr 환경에 requirements-ocr.txt를 설치한 뒤 실행하세요.") from exc
     engine = RapidOCR(params={"Global.text_score": 0.0})
-    diagnostics = []
-    records = collect_records(engine, image, min_score=min_score, region_fallback=region_fallback,
-                              diagnostics=diagnostics)
-    report = analyze_records(records, [image.shape[1], image.shape[0]],
-                             min_score=min_score, buildings_only=buildings_only)
+    report = recognize_labels(engine, image, min_score=min_score, buildings_only=buildings_only,
+                              region_fallback=region_fallback)
     report.update(engine="RapidOCR", source_file_name=image_path.name,
                   source_sha256=hashlib.sha256(image_bytes).hexdigest(),
-                  processed_at=datetime.now(timezone.utc).isoformat(), region_fallback=region_fallback,
-                  region_attempts=diagnostics)
+                  processed_at=datetime.now(timezone.utc).isoformat(), region_fallback=region_fallback)
     folder = output_root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ_") + uuid.uuid4().hex[:8])
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

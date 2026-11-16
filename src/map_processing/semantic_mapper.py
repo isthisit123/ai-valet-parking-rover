@@ -77,6 +77,16 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False,
     return regions
 
 
+def extract_dark_regions(hsv, *, opening=REAL_DARK_OPEN_KERNEL_SIZE,
+                         closing=REGION_CLOSE_KERNEL_SIZE, value_limit=BUILDING_REGION[1][2]):
+    lower, upper, min_area = BUILDING_REGION
+    mask = cv2.inRange(hsv, lower, (*upper[:2], value_limit))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones(opening, np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones(closing, np.uint8))
+    return extract_regions(mask, min_area, hsv.shape, allow_border=True,
+                           min_fill_ratio=REAL_DARK_MIN_FILL_RATIO)
+
+
 def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -92,18 +102,13 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
     )
     regions = []
     for (lower, upper, min_area), is_real_dark in region_settings:
-        mask = cv2.inRange(hsv, lower, upper)
         if is_real_dark:
             # 얇게 이어진 그림자를 끊고, 경계에 닿은 시설도 힌트 매칭 후보로 남긴다.
-            opening_kernel = np.ones(REAL_DARK_OPEN_KERNEL_SIZE, np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, opening_kernel)
+            regions.append(extract_dark_regions(hsv))
+            continue
+        mask = cv2.inRange(hsv, lower, upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        regions.append(
-            extract_regions(
-                mask, min_area, image.shape, allow_border=is_real_dark,
-                min_fill_ratio=REAL_DARK_MIN_FILL_RATIO if is_real_dark else REGION_MIN_FILL_RATIO,
-            )
-        )
+        regions.append(extract_regions(mask, min_area, image.shape))
     return tuple(regions)
 
 
@@ -199,6 +204,35 @@ def matching_region_indices(regions, hint):
         if x <= hint_x < x + width and y <= hint_y < y + height:
             matches.append(index)
     return matches
+
+
+def recover_dark_regions(image, regions, label_specs):
+    hints = [spec.get("hint") for spec in label_specs]
+    if not all(is_pixel_hint(hint) for hint in hints):
+        return regions
+
+    def hint_count(region):
+        return sum(bool(matching_region_indices([region], hint)) for hint in hints)
+
+    # 연결된 그림자로 한 후보에 여러 시설이 들어오면 해당 힌트를 다시 매칭한다.
+    recovered = [region for region in regions if hint_count(region) <= 1]
+    missing = [hint for hint in hints if not matching_region_indices(recovered, hint)]
+    if not missing:
+        return recovered
+
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    retries = ({"opening": (11, 11)}, {"closing": (13, 13), "value_limit": 110})
+    for settings in retries:
+        # 이음새를 끊거나 밝은 글자로 갈라진 어두운 영역을 메운다.
+        candidates = [region for region in extract_dark_regions(hsv, **settings) if hint_count(region) == 1]
+        for hint in missing:
+            matches = matching_region_indices(candidates, hint)
+            if len(matches) == 1:
+                recovered.append(candidates[matches[0]])
+        missing = [hint for hint in missing if not matching_region_indices(recovered, hint)]
+        if not missing:
+            break
+    return recovered
 
 
 def assign_dark_facilities(regions, label_specs):
@@ -446,8 +480,9 @@ def create_semantic_map(
     real_profile = uses_real_map_profile(label_data)
     if "paper_corners_px" in label_data:
         image = mask_paper_background(image, label_data["paper_corners_px"])
-    detected = detect_regions(image, map_id=map_id, real_profile=real_profile)
-    normal, accessible, buildings, gates = detected
+    normal, accessible, buildings, gates = detect_regions(image, map_id=map_id, real_profile=real_profile)
+    if real_profile:
+        buildings = recover_dark_regions(image, buildings, label_data["buildings"] + label_data["gates"])
     print("Normal spaces detected:", len(normal))
     print("Accessible spaces detected:", len(accessible))
     if real_profile:
@@ -456,7 +491,7 @@ def create_semantic_map(
         print("Buildings detected:", len(buildings))
         print("Gate regions detected:", len(gates))
     semantic_data = map_semantics(
-        graph_data, label_data, detected, expected_map_id=expected_map_id
+        graph_data, label_data, (normal, accessible, buildings, gates), expected_map_id=expected_map_id
     )
     if real_profile:
         print("매칭된 건물:", len(label_data["buildings"]))

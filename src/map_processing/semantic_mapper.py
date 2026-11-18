@@ -11,11 +11,17 @@ from .map_config import (
     BUILDING_REGION,
     DEFAULT_MAP,
     GATE_REGION,
+    LOW_LIGHT_ACCESSIBLE_REGION,
+    LOW_LIGHT_BUILDING_REGION,
+    LOW_LIGHT_NORMAL_REGION,
     OCR_LABEL_SCHEME,
     REAL_ACCESSIBLE_REGION,
     REAL_DARK_MIN_FILL_RATIO,
     REAL_DARK_OPEN_KERNEL_SIZE,
+    REAL_DARK_RETRY_VALUE_LIMITS,
     REAL_MAP_ID,
+    REAL_NORMAL_REGION,
+    REAL_REGION_REFERENCE_SIZE,
     REGION_BORDER_MARGIN,
     REGION_CLOSE_KERNEL_SIZE,
     REGION_MAX_IMAGE_RATIO,
@@ -30,8 +36,23 @@ from .planar_calibration import load_world_to_image, project_points
 from .map_identity import require_map_identity
 
 
+def component_polygon(component, offset):
+    # 글자 구멍은 제외하고 색상 영역의 외곽을 둘레 순서로 단순화한다.
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull = cv2.convexHull(max(contours, key=cv2.contourArea))
+    perimeter = cv2.arcLength(hull, True)
+    polygon = cv2.approxPolyDP(hull, 0.01 * perimeter, True)
+    for ratio in (0.01, 0.015, 0.02, 0.03, 0.04):
+        candidate = cv2.approxPolyDP(hull, ratio * perimeter, True)
+        if len(candidate) == 4 and cv2.contourArea(candidate) >= 0.93 * cv2.contourArea(hull):
+            polygon = candidate
+            break
+    points = polygon.reshape(-1, 2) + np.asarray(offset)
+    return points.astype(int).tolist()
+
+
 def extract_regions(mask, min_area, image_shape, *, allow_border=False,
-                    min_fill_ratio=REGION_MIN_FILL_RATIO):
+                    min_fill_ratio=REGION_MIN_FILL_RATIO, include_polygon=False):
     # 같은 색상으로 연결된 영역을 각각 검출
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8
@@ -73,42 +94,65 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False,
             "center": [round(float(cx), 2), round(float(cy), 2)],
             "area": int(area)
         })
+        if include_polygon:
+            component = (labels[y:y + h, x:x + w] == i).astype(np.uint8) * 255
+            regions[-1]["polygon_px"] = component_polygon(component, (x, y))
 
     return regions
 
 
-def extract_dark_regions(hsv, *, opening=REAL_DARK_OPEN_KERNEL_SIZE,
-                         closing=REGION_CLOSE_KERNEL_SIZE, value_limit=BUILDING_REGION[1][2]):
-    lower, upper, min_area = BUILDING_REGION
-    mask = cv2.inRange(hsv, lower, (*upper[:2], value_limit))
+def real_region_scale(image):
+    height, width = image.shape[:2]
+    reference_width, reference_height = REAL_REGION_REFERENCE_SIZE
+    return min(1.0, (width * height) / (reference_width * reference_height))
+
+
+def extract_dark_regions(hsv, *, opening=None, closing=REGION_CLOSE_KERNEL_SIZE,
+                         value_limit=None, threshold=BUILDING_REGION):
+    lower, upper, min_area = threshold
+    scale = real_region_scale(hsv)
+    if opening is None:
+        radius = max(1, round((REAL_DARK_OPEN_KERNEL_SIZE[0] // 2) * math.sqrt(scale)))
+        opening = (2 * radius + 1, 2 * radius + 1)
+    if value_limit is not None:
+        upper = (*upper[:2], value_limit)
+    mask = cv2.inRange(hsv, lower, upper)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones(opening, np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones(closing, np.uint8))
-    return extract_regions(mask, min_area, hsv.shape, allow_border=True,
+    return extract_regions(mask, math.ceil(min_area * scale), hsv.shape, allow_border=True,
                            min_fill_ratio=REAL_DARK_MIN_FILL_RATIO)
 
 
-def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False):
+def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False, low_light=False):
     # 색상 검출을 위해 BGR 이미지를 HSV로 변환
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     kernel = np.ones(REGION_CLOSE_KERNEL_SIZE, np.uint8)
     is_real_map = real_profile or map_id == REAL_MAP_ID
-    accessible_region = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
+    # 작은 웹캠 프레임에서 멀리 있는 시설도 후보로 남기도록 픽셀 기준을 줄인다.
+    area_scale = real_region_scale(image) if is_real_map else 1.0
+    normal = REAL_NORMAL_REGION if is_real_map else normal_region_for_map(map_id)
+    accessible = REAL_ACCESSIBLE_REGION if is_real_map else ACCESSIBLE_REGION
+    buildings = BUILDING_REGION
+    if is_real_map and low_light:
+        normal, accessible, buildings = LOW_LIGHT_NORMAL_REGION, LOW_LIGHT_ACCESSIBLE_REGION, LOW_LIGHT_BUILDING_REGION
     region_settings = (
-        (normal_region_for_map(REAL_MAP_ID if is_real_map else map_id), False),
-        (accessible_region, False),
-        (BUILDING_REGION, is_real_map),
-        (GATE_REGION, False),
+        (normal, False, 1.0),
+        (accessible, False, area_scale),
+        (buildings, is_real_map, area_scale),
+        (GATE_REGION, False, 1.0),
     )
     regions = []
-    for (lower, upper, min_area), is_real_dark in region_settings:
+    for index, (threshold, is_real_dark, scale) in enumerate(region_settings):
+        lower, upper, min_area = threshold
         if is_real_dark:
             # 얇게 이어진 그림자를 끊고, 경계에 닿은 시설도 힌트 매칭 후보로 남긴다.
-            regions.append(extract_dark_regions(hsv))
+            regions.append(extract_dark_regions(hsv, threshold=threshold))
             continue
         mask = cv2.inRange(hsv, lower, upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        regions.append(extract_regions(mask, min_area, image.shape))
+        regions.append(extract_regions(mask, math.ceil(min_area * scale), image.shape,
+                                       include_polygon=index < 2))
     return tuple(regions)
 
 
@@ -221,7 +265,16 @@ def recover_dark_regions(image, regions, label_specs):
         return recovered
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    retries = ({"opening": (11, 11)}, {"closing": (13, 13), "value_limit": 110})
+    retries = (
+        {"opening": (11, 11)},
+        *({"closing": (13, 13), "value_limit": limit} for limit in REAL_DARK_RETRY_VALUE_LIMITS),
+        # 기존 재검출에도 남은 시설만 큰 글자 구멍을 더 넓게 메워 재시도한다.
+        *(
+            {"closing": closing, "value_limit": limit}
+            for closing in ((17, 17), (21, 21))
+            for limit in REAL_DARK_RETRY_VALUE_LIMITS
+        ),
+    )
     for settings in retries:
         # 이음새를 끊거나 밝은 글자로 갈라진 어두운 영역을 메운다.
         candidates = [region for region in extract_dark_regions(hsv, **settings) if hint_count(region) == 1]
@@ -459,6 +512,7 @@ def create_semantic_map(
     output_path=DEFAULT_MAP.semantic_path,
     expected_map_id=None,
     calibration_path=None,
+    low_light=False,
 ):
     image = load_map_image(image_path)
     with open(graph_path, "r", encoding="utf-8") as f:
@@ -480,7 +534,21 @@ def create_semantic_map(
     real_profile = uses_real_map_profile(label_data)
     if "paper_corners_px" in label_data:
         image = mask_paper_background(image, label_data["paper_corners_px"])
-    normal, accessible, buildings, gates = detect_regions(image, map_id=map_id, real_profile=real_profile)
+    normal, accessible, buildings, gates = detect_regions(
+        image, map_id=map_id, real_profile=real_profile, low_light=low_light,
+    )
+    parking_retry = False
+    parking_specs = label_data.get("parking_spaces")
+    if (real_profile and not low_light and isinstance(parking_specs, list)
+            and len(normal) + len(accessible) != len(parking_specs)):
+        print("주차칸 수가 OCR 힌트와 달라 같은 사진을 어두운 영상 기준으로 재검출합니다.", flush=True)
+        retry_normal, retry_accessible, _, _ = detect_regions(
+            image, map_id=map_id, real_profile=True, low_light=True,
+        )
+        # 개수만 맞추지 않고 각 칸의 유형·고유 ID·힌트가 유일하게 대응하는지도 검사한다.
+        assign_parking_ids(retry_normal, retry_accessible, parking_specs)
+        normal, accessible = retry_normal, retry_accessible
+        parking_retry = True
     if real_profile:
         buildings = recover_dark_regions(image, buildings, label_data["buildings"] + label_data["gates"])
     print("Normal spaces detected:", len(normal))
@@ -493,6 +561,8 @@ def create_semantic_map(
     semantic_data = map_semantics(
         graph_data, label_data, (normal, accessible, buildings, gates), expected_map_id=expected_map_id
     )
+    if parking_retry:
+        semantic_data["parking_detection_profile"] = "low_light_retry"
     if real_profile:
         print("매칭된 건물:", len(label_data["buildings"]))
         print("매칭된 입출구:", len(label_data["gates"]))

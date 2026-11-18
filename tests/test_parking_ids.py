@@ -198,6 +198,65 @@ class ParkingIdsTest(unittest.TestCase):
         self.assertEqual(building["bbox"], [30, 40, 60, 50])
         self.assertEqual(entrance["bbox"], [130, 40, 60, 50])
 
+    def test_real_profile_keeps_dim_green_parking_space(self):
+        hsv = np.full((300, 500, 3), (0, 0, 255), np.uint8)
+        hsv[40:100, 60:150] = (55, 220, 95)
+        image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        normal, _, _, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        self.assertEqual(len(normal), 1)
+        self.assertEqual(normal[0]["bbox"], [60, 40, 90, 60])
+        digital, _, _, _ = semantic_mapper.detect_regions(image, map_id="digital_test")
+        self.assertFalse(digital)
+
+    def test_dark_region_retry_separates_facilities_from_gray_floor(self):
+        image = np.full((300, 400, 3), 105, dtype=np.uint8)
+        image[40:90, 30:90] = 20
+        image[40:90, 130:190] = 20
+        # 흰 글자가 검은 영역을 갈라도 재검출 시 시설 전체를 복원한다.
+        image[40:90, 155:165] = 255
+        labels = [{"id": "building_a", "hint": [60, 65]}, {"id": "entrance", "hint": [160, 65]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        self.assertFalse(initial)
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        building, entrance = semantic_mapper.assign_dark_facilities(recovered, labels)
+        self.assertEqual(building["bbox"], [30, 40, 60, 50])
+        self.assertEqual(entrance["bbox"], [130, 40, 60, 50])
+
+    def test_dark_region_retry_fills_large_text_gap_only_for_missing_gate(self):
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        image[110:, 200:] = 105
+        image[35:85, 30:90] = 20
+        image[130:202, 220:300] = 20
+        image[130:202, 254:272] = 255
+        labels = [{"id": "building_a", "hint": [60, 60]},
+                  {"id": "exit", "hint": [263, 165]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        building_index, = semantic_mapper.matching_region_indices(initial, labels[0]["hint"])
+        self.assertFalse(semantic_mapper.matching_region_indices(initial, labels[1]["hint"]))
+        # 기존 13px 메우기로는 이름표 중심의 18px 틈을 복원하지 못한다.
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        candidates = semantic_mapper.extract_dark_regions(hsv, closing=(13, 13), value_limit=90)
+        self.assertFalse(semantic_mapper.matching_region_indices(candidates, labels[1]["hint"]))
+
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        building, exit_region = semantic_mapper.assign_dark_facilities(recovered, labels)
+        self.assertEqual(building["bbox"], initial[building_index]["bbox"])
+        self.assertEqual(exit_region["bbox"], [220, 130, 80, 72])
+        self.assertEqual(len(recovered), len(initial) + 1)
+
+    def test_dark_region_large_closing_rejects_candidate_with_two_hints(self):
+        image = np.full((300, 400, 3), 105, dtype=np.uint8)
+        image[130:202, 220:300] = 20
+        image[130:202, 254:272] = 255
+        labels = [{"id": "entrance", "hint": [259, 165]},
+                  {"id": "exit", "hint": [266, 165]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        for label in labels:
+            self.assertFalse(semantic_mapper.matching_region_indices(recovered, label["hint"]))
+        with self.assertRaisesRegex(ValueError, "검은색 영역이 0개"):
+            semantic_mapper.assign_dark_facilities(recovered, labels)
+
     def test_real_map_matches_dim_blue_and_edge_touching_dark_facilities(self):
         image = np.full((300, 400, 3), 255, dtype=np.uint8)
         for x, y in ((30, 30), (310, 30), (30, 190), (339, 190)):
@@ -251,6 +310,35 @@ class ParkingIdsTest(unittest.TestCase):
                 }
                 with self.assertRaisesRegex(ValueError, message):
                     semantic_mapper.map_semantics(graph_data, wrong_labels, detected)
+
+    def test_small_camera_frame_keeps_the_far_accessible_space(self):
+        image = np.full((480, 640, 3), 255, dtype=np.uint8)
+        blue = (130, 68, 33)
+        cv2.rectangle(image, (333, 125), (401, 162), blue, -1)
+        cv2.rectangle(image, (198, 233), (291, 300), blue, -1)
+        cv2.rectangle(image, (310, 330), (333, 353), blue, -1)
+
+        _, accessible, _, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+
+        self.assertEqual(
+            [region["bbox"] for region in accessible],
+            [[333, 125, 69, 38], [198, 233, 94, 68]],
+        )
+
+    def test_low_light_separates_dark_facility_from_floor_and_recovers_spaces(self):
+        hsv = np.full((480, 640, 3), (0, 0, 100), dtype=np.uint8)
+        hsv[80:140, 100:180] = (55, 200, 75)
+        hsv[160:220, 100:180] = (112, 230, 80)
+        hsv[80:140, 300:380] = (150, 255, 10)
+        image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        normal, accessible, buildings, _ = semantic_mapper.detect_regions(
+            image, map_id=REAL_MAP_ID, low_light=True,
+        )
+
+        self.assertEqual([region["bbox"] for region in normal], [[100, 80, 80, 60]])
+        self.assertEqual([region["bbox"] for region in accessible], [[100, 160, 80, 60]])
+        self.assertEqual([region["bbox"] for region in buildings], [[300, 80, 80, 60]])
 
     def test_real_map_preserves_geometry_routes_and_ids(self):
         output_root = Path(self.enterContext(tempfile.TemporaryDirectory()))

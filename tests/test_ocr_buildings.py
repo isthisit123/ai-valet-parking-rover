@@ -16,6 +16,27 @@ def record(text, score=0.95):
 
 
 class BuildingOcrTest(unittest.TestCase):
+    def test_black_building_connected_to_dark_wood_is_retried_as_a_separate_region(self):
+        image = np.full((300, 400, 3), (40, 50, 70), np.uint8)
+        cv2.rectangle(image, (30, 100), (360, 280), (230, 230, 230), -1)
+        cv2.rectangle(image, (250, 100), (360, 180), (25, 25, 25), -1)
+        cv2.putText(image, 'B', (283, 153), cv2.FONT_HERSHEY_SIMPLEX, 1, (220, 220, 220), 2)
+
+        def engine(crop, **options):
+            if options.get('use_det'):
+                return SimpleNamespace(txts=None, scores=None, boxes=None)
+            return SimpleNamespace(txts=['B'], scores=[0.99])
+
+        with patch('src.map_processing.map_config.REAL_DARK_RETRY_VALUE_LIMITS', (110, 100, 90)):
+            self.assertEqual(collect_records(engine, image), [])
+        records = collect_records(engine, image)
+        self.assertEqual([row['text'] for row in records], ['B'])
+        center = np.asarray(records[0]['polygon_px']).mean(axis=0)
+        np.testing.assert_allclose(center, [305, 140], atol=2)
+        image[np.all(image == (40, 50, 70), axis=2)] = (32, 40, 55)
+        darker = collect_records(engine, image)
+        self.assertEqual([row['text'] for row in darker], ['B'])
+
     def test_exact_ten_label_rules_and_no_guessing(self):
         for text, label_id in LABEL_IDS.items():
             self.assertEqual(identify_label(text), label_id)
@@ -85,6 +106,38 @@ class BuildingOcrTest(unittest.TestCase):
         self.assertEqual(sorted(r["text"] for r in records), ["A", "B"])
         self.assertEqual(len(calls), 2)
         self.assertEqual(next(r for r in records if r["text"] == "A")["box_kind"], "color_region_recognition")
+
+    def test_gray_floor_missing_building_is_recovered_from_new_dark_region(self):
+        image = np.full((300, 500, 3), 95, np.uint8)
+        image[30:81, 310:371] = 20
+        attempts = []
+
+        def engine(frame, **kwargs):
+            attempts.append(frame.shape)
+            if kwargs.get("use_det"):
+                return SimpleNamespace(txts=None)
+            return SimpleNamespace(txts=("B",), scores=(0.99,))
+
+        diagnostics = []
+        records = collect_records(engine, image, diagnostics=diagnostics)
+        self.assertEqual([r["text"] for r in records], ["B"])
+        self.assertEqual(records[0]["polygon_px"], [[310, 30], [370, 30], [370, 80], [310, 80]])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(diagnostics[0]["bbox_xywh_px"], [310, 30, 61, 51])
+
+    def test_dark_region_retry_does_not_guess_b_from_eight(self):
+        image = np.full((300, 500, 3), 95, np.uint8)
+        image[30:81, 310:371] = 20
+
+        def engine(frame, **kwargs):
+            if kwargs.get("use_det"):
+                return SimpleNamespace(txts=None)
+            return SimpleNamespace(txts=("8",), scores=(0.99,))
+
+        records = collect_records(engine, image)
+        report = analyze_records(records, [500, 300])
+        building_b = next(item for item in report["labels"] if item["id"] == "building_b")
+        self.assertEqual(building_b["status"], "missing")
 
     def test_bright_text_boxes_exclude_border_background(self):
         crop = np.zeros((90, 150, 3), np.uint8)

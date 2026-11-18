@@ -62,6 +62,8 @@ def fit_floor_transform(pixel, world_cm, paper_px):
 
 
 def calibrate_floor(spec, image_size, *, max_error_cm):
+    if spec.get("paper_corner_source") == "projected_from_red_crosses":
+        raise ValueError("추정한 전지 외곽은 독립 기준점이 아닙니다. 카메라 십자 보정으로 검증하세요.")
     if not np.isfinite(max_error_cm) or max_error_cm <= 0:
         raise ValueError("허용 오차는 양수(cm)로 지정하세요.")
     size_cm = np.asarray(spec["paper_size_cm"], dtype=np.float32)

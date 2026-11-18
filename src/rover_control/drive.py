@@ -7,6 +7,8 @@ import socket
 import sys
 import time
 
+from src.map_processing.map_identity import map_identity, require_map_identity
+
 from .connection import add_connection_arguments, rover_endpoint
 
 from .tracking import (
@@ -35,10 +37,11 @@ def encode(message):
 
 
 class PoseReceiver:
-    def __init__(self, sock, map_id):
+    def __init__(self, sock, map_id, identity=None):
         self.sock = sock
         self.map_id = map_id
         self.latest = None
+        self.identity = identity
 
     def read(self):
         # 큐의 최신 관측을 쓰되 한 주기의 입력 처리 시간은 제한한다.
@@ -52,6 +55,8 @@ class PoseReceiver:
                 raise ValueError("위치 입력은 JSON 객체여야 합니다.")
             if data["map_id"] != self.map_id:
                 raise ValueError("위치 입력과 경로의 map_id가 다릅니다.")
+            if self.identity is not None and "map_image_sha256" in data:
+                require_map_identity(self.identity, data, "위치 입력")
             if data.get("type") == "lost":
                 raise ValueError("로버 위치 추적이 끊겼습니다.")
             if (data.get("type"), data.get("coordinate_frame"), data.get("unit"), data.get("origin")) != (
@@ -183,7 +188,9 @@ def main():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as pose_sock:
             pose_sock.bind(("127.0.0.1", args.pose_port))
             pose_sock.setblocking(False)
-            receiver = PoseReceiver(pose_sock, route.map_id)
+            route_data = json.loads(args.route.read_text(encoding="utf-8-sig"))
+            identity = map_identity(route_data) if "map_image_sha256" in route_data else None
+            receiver = PoseReceiver(pose_sock, route.map_id, identity)
             print(f"route={args.route.name} goal_cm={route.points[-1]} pose_port={args.pose_port}", flush=True)
             with rover_endpoint(args) as endpoint:
                 # 위치를 기다리는 동안 로버의 명령 타임아웃을 소모하지 않는다.

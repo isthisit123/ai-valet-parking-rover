@@ -89,6 +89,17 @@ class PathVisualizerTest(unittest.TestCase):
                         self.assertTrue(line_points)
                         self.assertTrue(all(tuple(preview[y, x]) == ROUTE_COLOR for x, y in line_points))
 
+    def test_junction_connection_follows_bend_in_road(self):
+        road_mask = np.zeros((12, 12), dtype=np.uint8)
+        road_mask[3:8, 2] = 255
+        road_mask[7, 2:10] = 255
+
+        path = graph_exporter.connect_to_node(road_mask, (2, 3), (9, 7))
+
+        self.assertEqual((path[0], path[-1]), ((2, 3), (9, 7)))
+        self.assertTrue(all(road_mask[y, x] for x, y in path))
+        self.assertTrue(all(0 < dist(a, b) <= sqrt(2) for a, b in zip(path, path[1:])))
+
     def test_cheapest_parallel_edge_reversed_and_joined(self):
         graph = nx.MultiGraph()
         graph.add_node("A", x=1, y=1)

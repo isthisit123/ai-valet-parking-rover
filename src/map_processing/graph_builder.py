@@ -19,6 +19,16 @@ def create_skeleton(road_mask):
 
     return skeleton
 
+
+def line_pixels(start, end):
+    x, y = start
+    dx, dy = end[0] - x, end[1] - y
+    steps = max(abs(dx), abs(dy))
+    yield start
+    for step in range(1, steps + 1):
+        yield round(x + dx * step / steps), round(y + dy * step / steps)
+
+
 def remove_small_components(road_mask):
     # 연결된 흰색 영역을 각각 구분
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(

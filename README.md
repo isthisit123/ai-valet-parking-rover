@@ -141,7 +141,44 @@ Invoke-RestMethod http://localhost:8001/api/rover-pose | ConvertTo-Json -Depth 6
 
 `POST /api/aruco`가 검출하고 `GET /api/rover-pose`가 최신 상태를 반환합니다. `rover.center_px`, `rover.heading_deg`, `tracking_status`를 확인하세요. `detected`일 때만 현재 로버 값이 있으며 `lost`·`ambiguous`·`stale`에는 `rover: null`입니다. 서버가 프레임을 받은 지 200ms를 넘기면 GET에서 만료 처리합니다. JSON은 고정 파일 `data/rover_runs/aruco/latest.json`에 덮어쓰며 프레임 PNG를 누적 저장하지 않습니다. 파일을 직접 읽는 소비자는 같은 노트북의 `time.monotonic()`과 `received_monotonic_s`, `valid_for_ms`로 만료 여부를 직접 확인해야 합니다.
 
-현재 결과는 `coordinate_frame: camera_image`, `unit: pixel`인 **로버 상단 마커 중심·영상 방향각**입니다. `map_pose`는 `null`이며 월드 cm나 바닥 기준 로버 중심으로 사용하지 않습니다. 마커 높이·마커와 로버 중심의 오프셋·카메라/지도 보정을 확인한 뒤 기존 주행용 월드 cm·UDP 계약에 연결해야 합니다. 이 단계는 모터 명령을 보내지 않습니다. 마커 모서리 순서는 [OpenCV 문서](https://docs.opencv.org/4.x/d5/dae/tutorial_aruco_detection.html)를 따릅니다.
+이 API의 결과는 `coordinate_frame: camera_image`, `unit: pixel`인 로버 상단 마커 중심·영상 방향각입니다. 월드 cm 변환과 주행 입력 전송은 아래 `pose_sender` 명령으로 실행합니다. 마커 모서리 순서는 [OpenCV 문서](https://docs.opencv.org/4.x/d5/dae/tutorial_aruco_detection.html)를 따릅니다.
+
+### 보정된 cm 위치를 주행 프로그램에 보내기
+
+같은 노트북에서 서버를 실행합니다. 주행 시작 전에 카메라 위치를 정하고, 로버를 치운 상태에서 지도 생성 버튼을 눌러 확인점 검증을 통과한 `latest/world/map_calibration.json`과 cm 경로를 준비합니다. 이때 A~D 십자의 픽셀과 실측 cm 좌표로 구한 변환식을 저장합니다. 주행 중에는 같은 카메라 구도에서 저장한 변환식을 계속 사용하므로 십자가 가려져도 로버 위치를 변환할 수 있습니다. 카메라 위치·방향·줌이나 전지 배치를 바꾼 다음에는 주행 전에 다시 보정합니다.
+
+```powershell
+$python = ".\.venv\Scripts\python.exe"
+& $python -X utf8 -m scripts.http_map_server --port 8001 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+새 PowerShell에서 저장소 루트로 이동한 뒤 위치 표시부터 확인합니다. 기존 웹캠 API를 사용하므로 카메라를 추가로 열지 않습니다. 터미널에는 약 1초마다 cm 위치와 월드 방향각이 표시됩니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m src.rover_control.pose_sender --preview-only
+```
+
+카메라 위치·높이는 수동 입력하지 않습니다. 현재 실측에서 마커 면 높이는 약 10.5cm이고, 마커는 구동 바퀴 축 중간점보다 앞쪽으로 2.5cm 떨어져 있습니다. `pose_sender`의 중심 오프셋 실행 기본값은 `[-2.5, 0]cm`이며 좌우 편차는 0으로 가정합니다. 아래 명령으로 값을 명시할 수 있습니다. 높이 10.5cm는 측정 기록이며 현재 바닥 투영 계산에 높이 보정은 적용하지 않습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m src.rover_control.pose_sender --preview-only --center-offset-cm -2.5 0
+```
+
+전송 좌표는 시작 전에 저장한 바닥 보정식을 적용한 상단 마커의 바닥 투영 근사입니다. 마커 높이에 따른 시차와 렌즈 왜곡은 남으므로 실제 로버 중심과 대조해 오차를 확인합니다. 마커 중심과 전방을 모두 같은 보정식으로 변환해 방향각에도 원근 보정을 적용합니다. 원점은 전지 왼쪽 위, +x 오른쪽·+y 아래, 오른쪽 0°·시계 방향 양수입니다. P5 교점 또는 독립 십자 E의 검증은 초기 지도·경로 생성 때 수행합니다.
+
+위치를 주행기에 전달하려면 위 명령에서 `--preview-only`를 빼고 실행합니다. 목표 주기는 0.10초이고 UDP `127.0.0.1:8766`으로 `pose`를 전송합니다. `captured_monotonic_s`는 원래 서버 수신 시각을 유지합니다. 같은 프레임을 반복 조회해 관측 시각을 새로 만들지 않습니다. 로버 마커 미검출·중복, 200ms 만료, 통신 오류, 카메라 세션·원본 해상도·기준 지도 불일치에는 `lost`를 보냅니다. 새 기준 지도를 생성하면 새 경로와 위치 전송기를 다시 실행합니다. 실패 뒤 주행기는 정지 상태로 종료하므로 문제를 해결하고 다시 실행합니다.
+
+좌우 PWM과 정지 시험을 마친 뒤, 별도 PowerShell에서 같은 캡처의 주행용 경로를 지정합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m src.rover_control.drive --usb --route data/http_map_captures/latest/world/routes/01_building_a_cm.json --max-speed-cm-s 4
+```
+
+ADB가 PATH에 없으면 `--adb '<adb.exe 경로>'`를 추가합니다. 위치·주행 명령의 세부 규약은 [팀 가이드](docs/TEAM_GUIDE.md#경로와-로버-위치)에 있습니다.
+
+### 실제 주행 경로 선택
+
+`drive --route`에 같은 캡처의 `world/routes/`에 있는 cm 경로 JSON을 지정합니다. `01_building_a_cm.json`은 A 건물 가까운 일반석, `02_accessible_cm.json`은 장애인석, `03_exit_cm.json`은 출구 가까운 일반석, `04_building_b_accessible_cm.json`은 B 건물 가까운 장애인석, `05_entrance_accessible_cm.json`은 입구 가까운 장애인석입니다. 선택된 주차칸 중앙이 최종 목적지입니다. 위 경로 생성은 정적 지도 기준이며 실시간 점유 연동은 별도로 확인해야 합니다. 웹의 픽셀 도착 시험 드롭다운은 수동 이동 시험에 사용합니다.
 
 ## 픽셀 도착 판정 테스트
 

@@ -167,7 +167,7 @@ class GenerateMapTest(unittest.TestCase):
 
     def test_camera_capture_replaces_png_and_map_with_matching_hashes(self):
         self.config.image_path.unlink()
-        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+        frame = load_map_image(DEFAULT_MAP.image_path)
 
         def report_for_capture(path, *_, **options):
             return {**self.report, "source_sha256": sha256(path.read_bytes()).hexdigest()}
@@ -189,7 +189,7 @@ class GenerateMapTest(unittest.TestCase):
         self.assertEqual(camera.release.call_count, 2)
         image_bytes = self.config.image_path.read_bytes()
         self.assertNotEqual(old_image, image_bytes)
-        self.assertEqual(cv2.imread(str(self.config.image_path))[0, 0].tolist(), frame[0, 0].tolist())
+        self.assertEqual(load_map_image(self.config.image_path)[0, 0].tolist(), frame[0, 0].tolist())
         digest = sha256(image_bytes).hexdigest()
         labels = json.loads(self.config.label_path.read_text(encoding="utf-8"))
         semantic = json.loads(self.config.semantic_path.read_text(encoding="utf-8"))
@@ -219,7 +219,7 @@ class GenerateMapTest(unittest.TestCase):
                              ocr_output_root=self.diagnostics)
             run_ocr.assert_not_called()
 
-            camera.read.return_value = (True, cv2.imread(str(self.config.image_path)))
+            camera.read.return_value = (True, load_map_image(self.config.image_path))
             with self.assertRaisesRegex(ValueError, "OCR failed"):
                 generate_map(self.config, Path(sys.executable), camera_index=0, replace=True,
                              ocr_output_root=self.diagnostics)

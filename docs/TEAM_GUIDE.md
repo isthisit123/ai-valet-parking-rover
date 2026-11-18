@@ -58,6 +58,8 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
+로버 실측 치수는 폭 15cm, 전체 길이 19cm입니다. 주행 제어 기준점은 좌우 구동 바퀴 축의 중간점이며 앞끝까지 9.5cm, 뒤끝까지 9.5cm입니다. 좌우 폭이 대칭이라고 가정하면 기준점에서 좌우 각각 7.5cm를 차지합니다. 마커 면 높이는 약 10.5cm이고 마커 중심은 기준점보다 앞쪽 2.5cm입니다. 이 치수는 통로·주차칸·회전 공간 검사의 입력 기준으로 기록하며, 현재 경로 추종의 차체 외곽 충돌 검사는 후속 구현 대상입니다.
+
 - 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
 - HTTP에서 `--marker-layout`를 사용하면 같은 캡처의 픽셀 경로를 재사용해 `latest/world/`에 보정 결과를 저장합니다. API의 `world_calibration.status`가 `verified`이면 주차칸 중앙까지의 cm 경로를 제공합니다. 픽셀 도착 시험은 `route_generation`의 진입점을 사용합니다. [HTTP 자동 보정 실행 방법](../README.md#같은-http-사진으로-cm-지도-만들기)
 - `POST /api/aruco`, `GET /api/rover-pose`에서는 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀과 영상 방향각으로 제공합니다. 목표 전송 주기는 100ms이며, 수신 후 200ms가 지나거나 마커를 잃으면 위치를 비웁니다. 로버 상단 마커를 월드 cm로 전달하려면 마커 높이와 로버 중심 오프셋의 실측 검증이 필요합니다.
@@ -65,6 +67,8 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
+- `src.rover_control.pose_sender`는 주행 전에 검증·저장한 바닥 변환식을 읽고, ArUco API가 보내는 로버 마커의 원본 픽셀 위치·방향을 월드로 바꿉니다. 웹캠 원본과 지도 PNG의 같은 비율 크기 차이를 반영합니다. 같은 구도에서 십자가 가려져도 변환식을 재사용합니다. 위치 메시지에는 `map_image_sha256`과 `id_assignment_revision`도 포함하며 주행기가 경로와 대조합니다. `--preview-only`로 위치를 확인할 수 있습니다.
+- 카메라 위치·높이를 수동 입력하지 않고 상단 마커의 바닥 투영 근사 좌표를 사용합니다. 주행 전 카메라 위치를 정해 보정하고 주행 중 구도를 유지합니다. 위치·줌·전지 배치가 달라지면 다시 보정합니다. 현재 마커 높이 실측은 약 10.5cm이며 높이 보정은 미적용입니다. `--center-offset-cm`은 마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리이고 실행 기본값은 `[-2.5, 0]cm`입니다. 좌우 편차는 0으로 가정하며 실제 중심 위치와 대조합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 `lost`를 보냅니다. [실행·설정](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
 
 ```json
 {"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}

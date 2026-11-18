@@ -8,7 +8,7 @@ import unittest
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import cv2
 import numpy as np
@@ -51,8 +51,18 @@ class ArrivalHttpTest(unittest.TestCase):
                         'schema_version': '0.1-draft',
                         'spaces': [{'parking_space_id': f'space_{i}', 'status': 'occupied' if i == 4 else 'free',
                                     'confidence': 0.5} for i in range(1, 7)]}
+            captured_base = datetime.now(timezone.utc) - timedelta(seconds=0.5)
+            frame_index = 0
+
+            def next_frame_time():
+                nonlocal frame_index
+                frame_index += 1
+                # Windows 시계 해상도 때문에 서로 다른 시험 프레임의 시각이 같아지지 않게 한다.
+                # 6개 모두 과거의 서로 다른 촬영 시각이며 서버의 중복 거부는 유지한다.
+                return (captured_base + timedelta(milliseconds=50 * frame_index)).isoformat()
+
             for _ in range(3):
-                snapshot['observed_at'] = datetime.now(timezone.utc).isoformat()
+                snapshot['observed_at'] = next_frame_time()
                 with urlopen(Request(url + '/api/parking-occupancy', json.dumps(snapshot).encode(),
                                      {'Content-Type': 'application/json'})) as response:
                     self.assertIn('occupancy', json.load(response))
@@ -72,7 +82,7 @@ class ArrivalHttpTest(unittest.TestCase):
                 self.assertAlmostEqual(started['radius_px'], started['arrival_region']['radius_px'])
             snapshot['spaces'][3]['status'] = 'free'
             for _ in range(3):
-                snapshot['observed_at'] = datetime.now(timezone.utc).isoformat()
+                snapshot['observed_at'] = next_frame_time()
                 with urlopen(Request(url + '/api/parking-occupancy', json.dumps(snapshot).encode(),
                                      {'Content-Type': 'application/json'})) as response:
                     json.load(response)

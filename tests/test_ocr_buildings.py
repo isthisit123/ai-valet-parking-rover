@@ -16,6 +16,27 @@ def record(text, score=0.95):
 
 
 class BuildingOcrTest(unittest.TestCase):
+    def test_black_building_connected_to_dark_wood_is_retried_as_a_separate_region(self):
+        image = np.full((300, 400, 3), (40, 50, 70), np.uint8)
+        cv2.rectangle(image, (30, 100), (360, 280), (230, 230, 230), -1)
+        cv2.rectangle(image, (250, 100), (360, 180), (25, 25, 25), -1)
+        cv2.putText(image, 'B', (283, 153), cv2.FONT_HERSHEY_SIMPLEX, 1, (220, 220, 220), 2)
+
+        def engine(crop, **options):
+            if options.get('use_det'):
+                return SimpleNamespace(txts=None, scores=None, boxes=None)
+            return SimpleNamespace(txts=['B'], scores=[0.99])
+
+        with patch('src.map_processing.map_config.REAL_DARK_RETRY_VALUE_LIMITS', (110, 100, 90)):
+            self.assertEqual(collect_records(engine, image), [])
+        records = collect_records(engine, image)
+        self.assertEqual([row['text'] for row in records], ['B'])
+        center = np.asarray(records[0]['polygon_px']).mean(axis=0)
+        np.testing.assert_allclose(center, [305, 140], atol=2)
+        image[np.all(image == (40, 50, 70), axis=2)] = (32, 40, 55)
+        darker = collect_records(engine, image)
+        self.assertEqual([row['text'] for row in darker], ['B'])
+
     def test_exact_ten_label_rules_and_no_guessing(self):
         for text, label_id in LABEL_IDS.items():
             self.assertEqual(identify_label(text), label_id)

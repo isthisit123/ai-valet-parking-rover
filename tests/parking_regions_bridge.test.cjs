@@ -105,10 +105,11 @@ test('loaded image can apply without a webcam session', () => {
     assert.equal(f.stored()['map.png_123'].length, 6);
 });
 
-test('PNG upload button applies the response polygons and exposes JSON link', async () => {
+function mapUploadFixture() {
     const f = fixture();
     const elements = [];
     const events = [];
+    const requests = [];
     const element = tag => {
         const value = {tag, children: [], listeners: {}, style: {},
             append(...items) {this.children.push(...items);},
@@ -130,6 +131,7 @@ test('PNG upload button applies the response polygons and exposes JSON link', as
         files: {parking_regions: '/captures/latest/parking_regions.json'}});
     f.report.image_size_px = f.report.parking_regions.image_size_px = [250, 200];
     f.context.fetch = async (url, options) => {
+        requests.push(options);
         assert.equal(url, '/api/map-capture');
         assert.equal(options.headers['X-Camera-Session'], 'track');
         assert.equal(options.headers['X-Source-Width'], '1000');
@@ -137,10 +139,55 @@ test('PNG upload button applies the response polygons and exposes JSON link', as
     };
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../scripts/http_map_bridge.js'), 'utf8'), f.context);
     const button = elements.find(e => e.tag === 'button');
+    return {...f, elements, events, requests, button,
+        input: key => elements.find(e => e.id === 'rover-camera-' + key),
+        status: elements.find(e => e.tag === 'pre')};
+}
+
+test('PNG upload button applies the response polygons and exposes JSON link', async () => {
+    const f = mapUploadFixture();
+    const {button, elements, events} = f;
     await button.listeners.click();
     assert.equal(button.disabled, false);
     assert.equal(f.stored().LIVE_WEBCAM.length, 6);
     assert.match(elements.find(e => e.tag === 'pre').textContent, /6개 구역 자동 적용/);
     assert.ok(elements.some(e => e.tag === 'a' && e.href === '/captures/latest/parking_regions.json'));
     assert.deepEqual(events, ['rover-map-start', 'rover-map-result', 'rover-map-end']);
+});
+
+test('web camera fields are captured with PNG and successful registration is shown', async () => {
+    const f = mapUploadFixture();
+    for (const [key, value] of Object.entries({x: '53', y: '151.7', z: '111.5'})) f.input(key).value = value;
+    f.report.camera_position = {status: 'saved', camera_position_cm: [53, 151.7, 111.5], marker_height_cm: 10.5};
+    f.report.files.camera_position = '/captures/latest/world/camera_position.json';
+    await f.button.listeners.click();
+    assert.deepEqual(JSON.parse(f.requests[0].headers['X-Rover-Camera-Position']),
+        {camera_position_cm: [53, 151.7, 111.5], marker_height_cm: 10.5});
+    assert.match(f.status.textContent, /카메라 좌표 등록 완료/);
+    assert.ok(f.elements.some(e => e.tag === 'a' && e.href === f.report.files.camera_position));
+    assert.equal(f.input('x').disabled, false);
+});
+
+for (const [name, values] of Object.entries({
+    partial: {x: '53', y: '', z: '111.5'}, nonfinite: {x: 'NaN', y: '151.7', z: '111.5'},
+    lowCamera: {x: '53', y: '151.7', z: '10.5'}, negativeHeight: {x: '53', y: '151.7', z: '111.5', height: '-1'},
+})) {
+    test(`invalid camera fields ${name} stop before PNG upload`, async () => {
+        const f = mapUploadFixture();
+        for (const [key, value] of Object.entries(values)) f.input(key).value = value;
+        await f.button.listeners.click();
+        assert.equal(f.requests.length, 0);
+        assert.match(f.status.textContent, /Z는 마커 높이보다 커야/);
+        assert.equal(f.button.disabled, false);
+    });
+}
+
+test('failed cm validation reports camera registration as not saved', async () => {
+    const f = mapUploadFixture();
+    for (const [key, value] of Object.entries({x: '-10', y: '151.7', z: '111.5'})) f.input(key).value = value;
+    f.report.camera_position = {status: 'not_saved', error: 'cm 보정 검증 필요'};
+    await f.button.listeners.click();
+    assert.match(f.status.textContent, /카메라 좌표 미등록/);
+    assert.doesNotMatch(f.status.textContent, /카메라 좌표 등록 완료/);
+    assert.equal(JSON.parse(f.requests[0].headers['X-Rover-Camera-Position']).camera_position_cm[0], -10);
 });

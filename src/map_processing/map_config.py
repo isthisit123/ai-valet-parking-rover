@@ -40,7 +40,9 @@ REAL_DARK_OPEN_KERNEL_SIZE = (7, 7)
 # 임시 완화: 그림자가 붙은 실물 입구 후보를 보존한다. 재검토 사항은 ROADMAP 참고.
 REAL_DARK_MIN_FILL_RATIO = 0.5
 # 회색 바닥과 검은 시설이 붙어 검출될 때만 적용하는 더 어두운 재검출 기준.
-REAL_DARK_RETRY_VALUE_LIMITS = (110, 100, 90)
+# 어두운 나무 바닥과 검은 시설이 연결된 사진에서는 50까지 단계적으로 분리한다.
+# OCR ID·힌트의 유일 매핑 검사는 그대로 유지한다.
+REAL_DARK_RETRY_VALUE_LIMITS = (110, 100, 90, 80, 70, 60, 50)
 REGION_MAX_IMAGE_RATIO = 0.08
 REGION_BORDER_MARGIN = 1
 REGION_MIN_SIDE = 20

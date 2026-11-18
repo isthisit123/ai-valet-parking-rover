@@ -103,19 +103,18 @@ class PoseSenderTest(unittest.TestCase):
                     angle = np.deg2rad(heading)
                     forward = np.array([np.cos(angle), np.sin(angle), 0])
                     right = np.array([-forward[1], forward[0], 0])
-                    center = np.array([*axle, 10.5]) + 2.5 * forward
+                    center = np.array([*axle, 10.5])
                     corners = [center - 2 * forward - 2 * right, center + 2 * forward - 2 * right,
                                center + 2 * forward + 2 * right, center - 2 * forward + 2 * right]
                     observation = self.observation()
                     observation['rover']['corners_px'] = pixels(corners).tolist()
-                    corrected = CapturePose(self.folder, camera_position_cm=camera.tolist(),
-                                            center_offset_cm=(-2.5, 0)).convert(observation)
+                    corrected = CapturePose(self.folder, camera_position_cm=camera.tolist()).convert(observation)
                     np.testing.assert_allclose([corrected['x_cm'], corrected['y_cm']], axle, atol=0.001)
                     self.assertLess(abs((corrected['heading_deg'] - heading + 180) % 360 - 180), 0.001)
                     self.assertTrue(corrected['height_correction_applied'])
                     self.assertEqual(corrected['marker_height_cm'], 10.5)
                     self.assertEqual(corrected['position_reference'], 'height_corrected_marker_with_offset')
-                    raw = CapturePose(self.folder, center_offset_cm=(-2.5, 0)).convert(observation)
+                    raw = CapturePose(self.folder).convert(observation)
                     self.assertGreater(np.linalg.norm(np.array([raw['x_cm'], raw['y_cm']]) - axle), 1)
 
     def test_invalid_height_and_camera_measurements_are_rejected(self):
@@ -142,7 +141,8 @@ class PoseSenderTest(unittest.TestCase):
             converter = stream.call_args.args[0]
             np.testing.assert_array_equal(converter.camera_position, [50, -70, 110])
             self.assertEqual(converter.marker_height, 10.5)
-            self.assertEqual(converter.offset, (-2.5, 0))
+            self.assertEqual(converter.offset, (0, 0))
+            self.assertIn('중심 오프셋: 전방 0 cm / 오른쪽 0 cm', output.getvalue())
             self.assertIn('높이 보정 적용', output.getvalue())
 
     def test_saved_camera_measurements_are_reused_only_for_the_same_capture(self):
@@ -162,6 +162,7 @@ class PoseSenderTest(unittest.TestCase):
             self.assertEqual(main(), 0)
             np.testing.assert_array_equal(stream.call_args.args[0].camera_position, [53, 151.7, 111.5])
             self.assertEqual(stream.call_args.args[0].marker_height, 10.5)
+            self.assertEqual(stream.call_args.args[0].offset, (0, 0))
         original_report = (self.folder / 'report.json').read_bytes()
         changed = {**self.report, 'camera_source': {**self.camera, 'session_id': 'new-camera'}}
         (self.folder / 'report.json').write_text(json.dumps(changed), encoding='utf-8')

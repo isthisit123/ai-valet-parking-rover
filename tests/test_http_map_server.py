@@ -18,6 +18,7 @@ from src.map_processing.graph_builder import remove_small_components
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES, connect_waypoints
 from src.map_processing.map_config import DEFAULT_MAP
 from src.rover_control.tracking import load_route
+from src.rover_control.pose_sender import CapturePose, load_camera_position
 from scripts.ocr_buildings import LABEL_IDS
 
 
@@ -57,11 +58,24 @@ class HttpMapServerTest(unittest.TestCase):
                   "markers_cm": {"A": [7.68, 19.76], "B": [86.87, 31.64], "C": [103.63, 67.87],
                                  "D": [16.67, 49.75], "E": [51.30, 48.19]}}
         self.start_server(marker_layout=layout)
-        with self.post(body) as response:
+        camera_headers = {"X-Source-Type": "webcam", "X-Camera-Session": "measured-camera",
+                          "X-Source-Width": "1280", "X-Source-Height": "720",
+                          "X-Rover-Camera-Position": json.dumps({"camera_position_cm": [53, 151.7, 111.5],
+                                                                "marker_height_cm": 10.5})}
+        with self.post(body, headers=camera_headers) as response:
             report = json.load(response)
         world = report["world_calibration"]
         self.assertEqual(world["status"], "verified", world)
         self.assertEqual(len(world["cases"]), 5)
+        self.assertEqual(report['camera_position']['status'], 'saved')
+        folder = Path(report['output_directory'])
+        settings = load_camera_position(folder)
+        self.assertEqual(settings['camera_position_cm'], [53, 151.7, 111.5])
+        converter = CapturePose(folder, camera_position_cm=settings['camera_position_cm'],
+                                marker_height_cm=settings['marker_height_cm'])
+        np.testing.assert_array_equal(converter.camera_position, [53, 151.7, 111.5])
+        with urlopen(self.url + report['files']['camera_position']) as response:
+            self.assertEqual(json.load(response)['camera_source']['session_id'], 'measured-camera')
         with urlopen(self.url + world["files"]["calibration"]) as response:
             calibration = json.load(response)
         self.assertEqual(calibration["source_frame"]["sha256"], hashlib.sha256(body).hexdigest())
@@ -81,11 +95,46 @@ class HttpMapServerTest(unittest.TestCase):
         self.assertTrue(all("polygon_cm" in r and "polygon_px" not in r for r in cm_spaces))
 
         layout["markers_cm"]["E"] = [58.0, 48.19]
-        with self.post(body) as response:
+        with self.post(body, headers=camera_headers) as response:
             failed_world = json.load(response)
         self.assertEqual(failed_world["route_generation"]["status"], "generated")
         self.assertEqual(failed_world["world_calibration"]["status"], "failed")
         self.assertFalse(path.exists())
+        self.assertEqual(failed_world['camera_position']['status'], 'not_saved')
+        self.assertFalse((folder / 'world/camera_position.json').exists())
+
+    def test_invalid_web_camera_coordinates_are_rejected_before_map_generation(self):
+        body = DEFAULT_MAP.image_path.read_bytes()
+        cases = ['invalid json', '[]', json.dumps({'camera_position_cm': [53, 151.7, 10.5]}),
+                 json.dumps({'camera_position_cm': [53, True, 111.5]}),
+                 json.dumps({'camera_position_cm': [53, 151.7, float('nan')]}),
+                 json.dumps({'camera_position_cm': [53, 151.7, 111.5], 'marker_height_cm': -1})]
+        with patch('scripts.http_map_server.generate_map') as generate:
+            for value in cases:
+                with self.subTest(value=value), self.assertRaises(HTTPError) as failure:
+                    self.post(body, headers={'X-Rover-Camera-Position': value})
+                with failure.exception as response:
+                    self.assertEqual(response.code, 400)
+                    self.assertTrue(json.load(response)['error'])
+            generate.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_camera_registration_requires_calibration_and_current_webcam(self):
+        body = DEFAULT_MAP.image_path.read_bytes()
+        headers = {'X-Rover-Camera-Position': json.dumps({'camera_position_cm': [53, 151.7, 111.5]}),
+                   'X-Camera-Session': 'session', 'X-Source-Type': 'webcam',
+                   'X-Source-Width': '1280', 'X-Source-Height': '720'}
+        with self.assertRaises(HTTPError) as failure:
+            self.post(body, headers=headers)
+        with failure.exception as response:
+            self.assertIn('--marker-layout', json.load(response)['error'])
+        self.start_server(marker_layout={'map_id': DEFAULT_MAP.map_id})
+        for change in ({'X-Source-Type': 'image'}, {'X-Camera-Session': ''}, {'X-Source-Height': '0'}):
+            with self.subTest(change=change), self.assertRaises(HTTPError) as failure:
+                self.post(body, headers={**headers, **change})
+            with failure.exception as response:
+                self.assertIn('웹캠', json.load(response)['error'])
+        self.assertFalse(self.output.exists())
 
     def ocr_report(self, path, _python, output, _score):
         body = path.read_bytes()
@@ -101,9 +150,9 @@ class HttpMapServerTest(unittest.TestCase):
         (folder / "report.json").write_text(json.dumps(report), encoding="utf-8")
         return report
 
-    def post(self, body, content_type="image/png"):
+    def post(self, body, content_type="image/png", *, headers=None):
         return urlopen(Request(self.url + "/api/map-capture", body,
-                               {"Content-Type": content_type, "X-Captured-At": "test-frame-time"}), timeout=30)
+                               {"Content-Type": content_type, "X-Captured-At": "test-frame-time", **(headers or {})}), timeout=30)
 
     def test_http_png_to_graph_and_semantics_without_replacing_default_map(self):
         body = DEFAULT_MAP.image_path.read_bytes()

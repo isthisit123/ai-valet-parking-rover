@@ -30,6 +30,7 @@ from scripts.parking_regions import export_parking_regions
 from src.rover_control.aruco_tracker import ArucoTracker
 from src.rover_control.arrival_test import ArrivalTest
 from src.rover_control.live_parking import LiveParking
+from src.rover_control.pose_sender import CapturePose, save_camera_position
 from src.rover_control.map_preview import capture_floor_points, export_cm_routes, read_json, verify_junction
 
 
@@ -348,9 +349,30 @@ def _generate_map_attempt(body, output_root, *, labels_path=DEFAULT_MAP.label_pa
     return report
 
 
-def generate_map(body, output_root, **options):
+def validate_camera_measurement(data):
+    if not isinstance(data, dict):
+        raise ValueError("카메라 좌표는 JSON 객체여야 합니다.")
+    position = data.get("camera_position_cm")
+    height = data.get("marker_height_cm", 10.5)
+    if (not isinstance(position, list) or len(position) != 3
+            or any(type(v) not in (int, float) or not math.isfinite(v) for v in position)
+            or type(height) not in (int, float) or not math.isfinite(height) or height < 0
+            or position[2] <= height):
+        raise ValueError("렌즈 X·Y·Z와 마커 높이는 유한한 cm 값이어야 하며 Z는 마커 높이보다 커야 합니다.")
+    return {"camera_position_cm": position, "marker_height_cm": height}
+
+
+def generate_map(body, output_root, *, camera_measurement=None, **options):
     """검증 성공 결과는 latest, 실패 진단은 last_failed의 고정 경로에 갱신한다."""
     decode_png(body)  # 잘못된 요청은 출력 폴더도 만들지 않는다.
+    if camera_measurement is not None:
+        camera_measurement = validate_camera_measurement(camera_measurement)
+        camera = options.get("camera_source") or {}
+        if options.get("marker_layout") is None or options.get("legacy_hints"):
+            raise ValueError("카메라 좌표 등록은 --marker-layout을 지정한 OCR 지도 생성에서 사용하세요.")
+        if (camera.get("kind") != "webcam" or not camera.get("session_id")
+                or any(type(camera.get(k)) is not int or camera[k] <= 0 for k in ("width", "height"))):
+            raise ValueError("카메라 좌표는 현재 웹캠을 시작한 뒤 등록하세요.")
     output_root = Path(output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".http-build-", dir=output_root) as scratch:
@@ -397,7 +419,19 @@ def generate_map(body, output_root, **options):
             if target.is_symlink() or target.resolve().parent != output_root:
                 raise ValueError("고정 결과 폴더가 지정한 출력 폴더 밖을 가리킵니다.")
             report["latest_preserved"] = not complete and (output_root / "latest").is_dir()
+            save_measurement = (camera_measurement is not None and complete
+                                and report.get("world_calibration", {}).get("status") == "verified")
+            if camera_measurement is not None:
+                report["camera_position"] = {**camera_measurement,
+                    "status": "saved" if save_measurement else "not_saved"}
+                if save_measurement:
+                    report["files"]["camera_position"] = prefix + "world/camera_position.json"
+                else:
+                    report["camera_position"]["error"] = "지도·경로와 cm 보정 검증이 모두 성공해야 카메라 좌표를 등록합니다."
             write_json(pending / "report.json", report)
+            if save_measurement:
+                converter = CapturePose(pending, **camera_measurement)
+                save_camera_position(converter)
             # 복원도 잠길 경우 TemporaryDirectory 정리가 이전 지도를 삭제하지 않도록
             # 백업은 임시 빌드 폴더 밖에 둔다.
             backup = output_root / (".previous-" + uuid.uuid4().hex)
@@ -615,12 +649,15 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise ValueError("PNG 전송이 완료되지 않았습니다.")
+                camera_header = self.headers.get("X-Rover-Camera-Position")
+                measurement = None if camera_header is None else validate_camera_measurement(json.loads(camera_header))
                 arrival.stop("map_regeneration")
                 report = generate_map(body, output_root, labels_path=labels_path, mapping_path=mapping_path,
                                       captured_at=self.headers.get("X-Captured-At"), ocr_python=ocr_python,
                                       min_score=min_score, legacy_hints=legacy_hints,
                                       preparation_path=preparation_path, map_id=map_id, camera_source=self.camera_source(),
-                                      marker_layout=marker_layout, max_error_cm=max_error_cm)
+                                      marker_layout=marker_layout, max_error_cm=max_error_cm,
+                                      camera_measurement=measurement)
                 self.send_json(200 if report["status"] == "map_generated" else 422, report)
             except (ValueError, OSError) as exc:
                 self.send_json(400, {"error": str(exc)})

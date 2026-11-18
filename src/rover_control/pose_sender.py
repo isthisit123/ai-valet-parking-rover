@@ -216,8 +216,8 @@ def main():
     parser.add_argument("--server-url", default="http://127.0.0.1:8001")
     parser.add_argument("--pose-port", type=int, default=8766)
     parser.add_argument("--marker-id", type=int, default=7)
-    parser.add_argument("--center-offset-cm", nargs=2, type=float, default=(-2.5, 0.0), metavar=("FORWARD", "RIGHT"),
-                        help="마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리(cm), 기본 -2.5 0")
+    parser.add_argument("--center-offset-cm", nargs=2, type=float, default=(0.0, 0.0), metavar=("FORWARD", "RIGHT"),
+                        help="마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리(cm), 기본 0 0")
     parser.add_argument("--preview-only", action="store_true", help="cm 위치를 터미널에서만 확인")
     camera = parser.add_mutually_exclusive_group()
     camera.add_argument("--camera-position-cm", nargs=3, type=float, metavar=("X", "Y", "Z"),
@@ -251,6 +251,7 @@ def main():
         if args.camera_position_cm is not None:
             save_camera_position(converter)
         print(f"map={converter.identity['map_id']} unit=cm period={CONTROL_PERIOD_S}s UDP={args.pose_port}", flush=True)
+        print(f"중심 오프셋: 전방 {converter.offset[0]:g} cm / 오른쪽 {converter.offset[1]:g} cm", flush=True)
         if converter.camera_position is not None:
             print(f"높이 보정 적용: camera_cm={converter.camera_position.tolist()} marker_height_cm={converter.marker_height:g}", flush=True)
             print("카메라 실측 위치는 현재 보정 구도와 같아야 합니다. 렌즈 왜곡·마커 기울기 오차는 별도 확인하세요.", flush=True)

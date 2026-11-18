@@ -94,14 +94,19 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
+로버 실측 치수는 폭 15cm, 전체 길이 19cm입니다. 주행 제어 기준점은 좌우 구동 바퀴 축의 중간점이며 앞끝까지 9.5cm, 뒤끝까지 9.5cm입니다. 좌우 폭이 대칭이라고 가정하면 기준점에서 좌우 각각 7.5cm를 차지합니다. 마커 면 높이는 약 10.5cm이고 마커 중심은 기준점보다 앞쪽 2.5cm입니다. 이 치수는 통로·주차칸·회전 공간 검사의 입력 기준으로 기록하며, 현재 경로 추종의 차체 외곽 충돌 검사는 후속 구현 대상입니다.
+
 - 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
-- HTTP에서 `--marker-layout`를 사용하면 같은 캡처의 픽셀 경로를 재사용해 `latest/world/`에 보정 결과를 저장합니다. API의 `world_calibration.status`가 `verified`이면 주차칸 중앙까지의 cm 경로를 제공합니다. 픽셀 도착 시험은 `route_generation`의 진입점을 사용합니다. [HTTP 자동 보정 실행 방법](../README.md#같은-http-사진으로-cm-지도-만들기)
+- HTTP에서 `--marker-layout`를 사용하면 같은 캡처의 픽셀 경로를 재사용해 `latest/world/`에 보정 결과를 저장합니다. API의 `world_calibration.status`가 `verified`이면 주차칸 중앙까지의 cm 경로를 제공합니다. `route_generation`의 정적 픽셀 파일은 도로 진입점에서 끝나며, 웹의 실시간 도착 시험은 선택한 칸 중앙까지 별도 미리보기 구간을 연결합니다. [HTTP 자동 보정 실행 방법](../README.md#같은-http-사진으로-cm-지도-만들기)
 - `POST /api/aruco`, `GET /api/rover-pose`에서는 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀과 영상 방향각으로 제공합니다. 목표 전송 주기는 100ms이며, 수신 후 200ms가 지나거나 마커를 잃으면 위치를 비웁니다. 로버 상단 마커를 월드 cm로 전달하려면 마커 높이와 로버 중심 오프셋의 실측 검증이 필요합니다.
 - ArUco 전송은 원본 해상도의 JPEG 품질 0.85를 기본으로 하고 기존 `image/png`도 수신합니다. 이미지 디코딩 전 JPEG 헤더/PNG IHDR의 해상도 제한을 검사합니다. 지도 캡처 API는 계속 PNG만 받습니다. 브라우저는 인코딩 200ms 초과 시 전송을 버리고 HTTP 요청은 1초에 종료합니다. 좌표 만료는 계속 200ms이며 촬영 시각도 확인합니다. `detection_status`는 실제 검출 결과이고 `tracking_status`는 만료를 반영한 상태입니다. 늦은 프레임에서는 마커를 검출했어도 `rover:null`입니다. UI는 인코딩·전송/응답·서버 검출 시간을 분리 표시하고, 카메라 변경 도중의 프레임과 중복 영상 프레임을 재사용하지 않습니다.
 
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
+- `src.rover_control.pose_sender`는 주행 전에 검증·저장한 바닥 변환식을 읽고, ArUco API가 보내는 로버 마커의 원본 픽셀 위치·방향을 월드로 바꿉니다. 웹캠 원본과 지도 PNG의 같은 비율 크기 차이를 반영합니다. 같은 구도에서 십자가 가려져도 변환식을 재사용합니다. 위치 메시지에는 `map_image_sha256`과 `id_assignment_revision`도 포함하며 주행기가 경로와 대조합니다. `--preview-only`로 위치를 확인할 수 있습니다.
+- `drive --route`는 시작할 때 지정한 검증된 cm 경로를 읽습니다. 웹의 실시간 픽셀 경로·`route_revision`·점유 상태를 모터 주행으로 전달하는 소비자는 아직 없습니다. 후속 연결에서는 같은 캡처의 보정값과 지도 식별자를 검사하고, 마커 중심과 구동 바퀴 축 중간점의 차이 및 경로 교체·안내 중단 시 정지 처리를 맞춰야 합니다. 웹의 마커 중심·칸 내부 원 판정은 실제 주행기의 목표 2cm 이내 정지·새 위치 3개 안정 확인과 별도입니다.
+- 카메라 위치·높이를 수동 입력하지 않고 상단 마커의 바닥 투영 근사 좌표를 사용합니다. 주행 전 카메라 위치를 정해 보정하고 주행 중 구도를 유지합니다. 위치·줌·전지 배치가 달라지면 다시 보정합니다. 현재 마커 높이 실측은 약 10.5cm이며 높이 보정은 미적용입니다. `--center-offset-cm`은 마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리이고 실행 기본값은 `[-2.5, 0]cm`입니다. 좌우 편차는 0으로 가정하며 실제 중심 위치와 대조합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 `lost`를 보냅니다. [실행·설정](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
 
 ```json
 {"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}
@@ -119,7 +124,5 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 배선·모터 보정·정지 조건은 [UNO Q 수신 앱](../apps/q_rover_receiver/README.md)을 참고합니다. 실주행은 실측 보정과 위치·정지 시험 후 출발점 근처의 짧은 직선부터 진행합니다.
 
 ## Git 작업
-
-픽셀 도착 시험은 `GET /api/arrival-tests`, `POST /api/arrival-test/start`, `POST /api/arrival-test/stop`, `GET /api/arrival-test`를 사용합니다. 생성한 5개 경로의 마지막 도로 진입점을 선택하며 기본 반경 15px·안정 유지 1초·최소 5관측으로 판정합니다. `X-Camera-Session`, `X-Source-Type`, `X-Source-Width`, `X-Source-Height`를 지도 생성과 마커 입력에 함께 기록해 같은 웹캠 연결/해상도인지 확인합니다. 실제 물리적 구도는 별도 고정해야 합니다. 지도 버전/연결 변경 시 무효화하며 상단 마커 위치를 지도 픽셀로만 비율 변환합니다. 결과는 `data/rover_runs/arrival/latest.json`, `planning_mode: image_pixel_test`입니다. 이 성공은 주차 완료·경로 주행 성공·월드 cm 도착을 뜻하지 않으며 주행팀의 보정/제어 코드는 변경하지 않습니다.
 
 담당 기능 브랜치는 최신 `main`에서 분기하고, 기능별로 테스트한 뒤 PR을 올립니다. 팀원에게는 변경 목적, 실행 명령·결과, 영향받는 데이터 규칙, 남은 실물 확인을 전달합니다. 모델·카메라 원본·실행 로그·`archives/`는 로컬에서 관리합니다.

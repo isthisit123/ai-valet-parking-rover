@@ -8,14 +8,13 @@ from pathlib import Path
 import threading
 import time
 
-import cv2
 import networkx as nx
 import numpy as np
 
 from src.map_processing.graph_builder import line_pixels, remove_small_components
 from src.rover_control.arrival_geometry import arrival_circle
 from src.map_processing.map_identity import map_identity, require_map_identity
-from src.map_processing.map_reader import detect_road_mask
+from src.map_processing.map_reader import detect_road_mask, load_map_image
 from src.map_processing.occupancy import DEFAULT_OCCUPANCY_TTL, occupancy_states
 from src.map_processing.parking_selector import load_parking_map, select_parking_from_map
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES, connect_waypoints
@@ -50,9 +49,10 @@ class LiveParking:
                 require_map_identity(report, semantic, "실시간 의미 지도")
                 if not graph or not nx.is_connected(graph):
                     raise ValueError("연결된 도로 그래프가 필요합니다.")
-                image = cv2.imread(str(root / "source.png"))
-                if image is None:
-                    raise ValueError("기준 지도 PNG를 읽을 수 없습니다.")
+                try:
+                    image = load_map_image(root / "source.png")
+                except OSError as exc:
+                    raise ValueError("기준 지도 PNG를 읽을 수 없습니다.") from exc
                 mask = remove_small_components(detect_road_mask(image))
                 self.context = (report, semantic, graph, mask)
                 self.snapshot = self.received = self.last_observed = None

@@ -64,18 +64,26 @@ def write_live_map(root):
 
 class LiveParkingTest(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(TemporaryDirectory()))
+        self.root = Path(self.enterContext(TemporaryDirectory())) / '한글 지도'
         self.report = write_live_map(self.root)
         self.clock = 10.0
         self.enterContext(patch('time.monotonic', side_effect=lambda: self.clock))
+        self.wall_epoch = datetime.now(timezone.utc) - timedelta(seconds=self.clock)
+        for module in ('src.rover_control.live_parking', 'src.map_processing.occupancy',
+                       'src.rover_control.arrival_test'):
+            clock_datetime = self.enterContext(patch(f'{module}.datetime', wraps=datetime))
+            clock_datetime.now.side_effect = lambda tz=None: self.wall_now().astimezone(tz)
         self.parking = LiveParking(self.root)
         self.arrival = ArrivalTest(self.root, parking=self.parking)
         self.sequence = 0
 
+    def wall_now(self):
+        return self.wall_epoch + timedelta(seconds=self.clock)
+
     def snapshot(self, **states):
         self.sequence += 1
-        # 관측 시각은 과거의 서로 다른 프레임이며 monotonic 시계로 연속 시간을 시험한다.
-        observed = datetime.now(timezone.utc) - timedelta(milliseconds=20)
+        # 촬영·수신 시계를 함께 진행하고 같은 시험 시각의 새 프레임도 구별한다.
+        observed = self.wall_now() - timedelta(milliseconds=20) + timedelta(microseconds=self.sequence)
         return {**{k: self.report[k] for k in ('map_id', 'id_assignment_revision', 'map_image_sha256', 'capture_id', 'camera_source')},
                 'schema_version': '0.1-draft', 'observed_at': observed.isoformat(),
                 'spaces': [{'parking_space_id': f'space_{i}', 'status': states.get(f'space_{i}', 'free'), 'confidence': 0.5}
@@ -234,7 +242,7 @@ class LiveParkingTest(unittest.TestCase):
         changes = [lambda d: d.update(capture_id='old'),
                    lambda d: d.update(map_image_sha256='old'),
                    lambda d: d['camera_source'].update(session_id='other'),
-                   lambda d: d.update(observed_at=(datetime.now(timezone.utc) - timedelta(seconds=self.parking.TTL_SECONDS + 1)).isoformat()),
+                   lambda d: d.update(observed_at=(self.wall_now() - timedelta(seconds=self.parking.TTL_SECONDS + 1)).isoformat()),
                    lambda d: d['spaces'].append(d['spaces'][0])]
         for change in changes:
             altered = deepcopy(self.snapshot())
@@ -246,7 +254,7 @@ class LiveParkingTest(unittest.TestCase):
 
     def test_inference_delay_is_not_added_to_free_observation_gap(self):
         self.parking.TTL_SECONDS = 2.0
-        base = datetime.now(timezone.utc)
+        base = self.wall_now()
         for index in range(3):
             wall = base + timedelta(seconds=1.3 * index)
             data = self.snapshot()

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from scripts.http_map_server import decode_png, handler_for, prepare_paper_image, transform_hints
-from src.map_processing.map_reader import detect_road_mask
+from src.map_processing.map_reader import detect_road_mask, load_map_image
 from src.map_processing.graph_builder import remove_small_components
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES, connect_waypoints
 from src.map_processing.map_config import DEFAULT_MAP
@@ -46,7 +46,7 @@ class HttpMapServerTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{server.server_port}"
 
     def test_world_calibration_uses_http_snapshot_and_withholds_routes_on_wrong_check(self):
-        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+        frame = load_map_image(DEFAULT_MAP.image_path)
         # 원본 사진의 A~D와 독립 확인점 E가 모두 같은 입력에 있어야 한다.
         cv2.line(frame, (653, 377), (681, 377), (0, 0, 220), 5)
         cv2.line(frame, (667, 366), (667, 388), (0, 0, 220), 5)
@@ -138,7 +138,7 @@ class HttpMapServerTest(unittest.TestCase):
         self.assertFalse(routes["occupancy_checked"])
         self.assertEqual(routes["unit"], "pixel")
         self.assertEqual([case["case_id"] for case in routes["cases"]], [case[0] for case in DEFAULT_ROUTE_CASES])
-        road_mask = remove_small_components(detect_road_mask(cv2.imread(str(DEFAULT_MAP.image_path))))
+        road_mask = remove_small_components(detect_road_mask(load_map_image(DEFAULT_MAP.image_path)))
         nodes = {node["id"]: node for node in semantic["nodes"]}
         for case in routes["cases"]:
             with self.subTest(case=case["case_id"]):
@@ -180,7 +180,7 @@ class HttpMapServerTest(unittest.TestCase):
         (old / "keep.txt").write_text("historical capture")
         with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
             first = json.load(response)
-        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+        frame = load_map_image(DEFAULT_MAP.image_path)
         frame[0, 0] = 254
         _, encoded = cv2.imencode(".png", frame)
         with self.post(encoded.tobytes()) as response:
@@ -258,7 +258,7 @@ class HttpMapServerTest(unittest.TestCase):
 
     def test_new_aspect_and_camera_frame_uses_new_ocr_without_old_mask(self):
         frame = np.full((960, 1280, 3), 255, np.uint8)
-        frame[120:840] = cv2.imread(str(DEFAULT_MAP.image_path))
+        frame[120:840] = load_map_image(DEFAULT_MAP.image_path)
         ok, encoded = cv2.imencode(".png", frame)
         self.assertTrue(ok)
         body = encoded.tobytes()

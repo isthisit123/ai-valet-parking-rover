@@ -58,7 +58,9 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
-현재 ArUco HTTP 입력은 위 주행용 월드 위치와 별개입니다. `POST /api/aruco`, `GET /api/rover-pose`에서 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀·영상 기준 각도로 제공합니다. 사용자 사진 기준 마커 +x가 전방이며 오른쪽 0°·시계 방향 양수입니다. 목표 전송은 100ms, 만료는 수신 후 200ms이고 미검출·중복·만료 시 `rover`는 `null`입니다. `received_monotonic_s`는 서버 프레임 수신 시각이며 카메라 노출 시각을 보장하지 않습니다. `map_pose: null`, `pose_status: calibration_required`인 이 데이터를 월드 cm UDP 입력으로 바로 사용하지 않습니다. 마커는 로버 상단에 있어 높이·로버 중심 오프셋·월드 변환 검증이 남아 있습니다.
+- 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
+- HTTP에서 `--marker-layout`를 사용하면 같은 캡처의 픽셀 경로를 재사용해 `latest/world/`에 보정 결과를 저장합니다. API의 `world_calibration.status`가 `verified`이면 주차칸 중앙까지의 cm 경로를 제공합니다. 픽셀 도착 시험은 `route_generation`의 진입점을 사용합니다. [HTTP 자동 보정 실행 방법](../README.md#같은-http-사진으로-cm-지도-만들기)
+- `POST /api/aruco`, `GET /api/rover-pose`에서는 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀과 영상 방향각으로 제공합니다. 목표 전송 주기는 100ms이며, 수신 후 200ms가 지나거나 마커를 잃으면 위치를 비웁니다. 로버 상단 마커를 월드 cm로 전달하려면 마커 높이와 로버 중심 오프셋의 실측 검증이 필요합니다.
 
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.

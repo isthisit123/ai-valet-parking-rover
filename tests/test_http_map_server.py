@@ -17,28 +17,69 @@ from src.map_processing.map_reader import detect_road_mask
 from src.map_processing.graph_builder import remove_small_components
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES, connect_waypoints
 from src.map_processing.map_config import DEFAULT_MAP
+from src.rover_control.tracking import load_route
 from scripts.ocr_buildings import LABEL_IDS
 
 
 class HttpMapServerTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        web = self.root / "web"
-        web.mkdir()
-        (web / "index.html").write_text('<html><body><canvas id="main-canvas"></canvas></body></html>')
+        self.web = self.root / "web"
+        self.web.mkdir()
+        (self.web / "index.html").write_text('<html><body><canvas id="main-canvas"></canvas></body></html>')
         self.output = self.root / "captures"
         self.mapping_path = DEFAULT_MAP.image_path.with_name("parking_map_real_parkinghaeven_mapping.json")
         labels = json.loads(DEFAULT_MAP.label_path.read_text(encoding="utf-8"))
         self.hints = {item["id"]: item["hint"] for key in ("buildings", "gates", "parking_spaces")
                       for item in labels[key]}
         self.enterContext(patch("scripts.generate_map.run_ocr", side_effect=self.ocr_report))
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(web, self.output, DEFAULT_MAP.label_path, self.mapping_path))
+        self.start_server()
+
+    def start_server(self, **options):
+        handler = handler_for(self.web, self.output, DEFAULT_MAP.label_path, self.mapping_path, **options)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(thread.join)
         self.addCleanup(server.shutdown)
         self.url = f"http://127.0.0.1:{server.server_port}"
+
+    def test_world_calibration_uses_http_snapshot_and_withholds_routes_on_wrong_check(self):
+        frame = cv2.imread(str(DEFAULT_MAP.image_path))
+        # 원본 사진의 A~D와 독립 확인점 E가 모두 같은 입력에 있어야 한다.
+        cv2.line(frame, (653, 377), (681, 377), (0, 0, 220), 5)
+        cv2.line(frame, (667, 366), (667, 388), (0, 0, 220), 5)
+        ok, encoded = cv2.imencode(".png", frame)
+        self.assertTrue(ok)
+        body = encoded.tobytes()
+        layout = {"map_id": DEFAULT_MAP.map_id, "paper_size_cm": [109.5, 79],
+                  "markers_cm": {"A": [7.68, 19.76], "B": [86.87, 31.64], "C": [103.63, 67.87],
+                                 "D": [16.67, 49.75], "E": [51.30, 48.19]}}
+        self.start_server(marker_layout=layout)
+        with self.post(body) as response:
+            report = json.load(response)
+        world = report["world_calibration"]
+        self.assertEqual(world["status"], "verified", world)
+        self.assertEqual(len(world["cases"]), 5)
+        with urlopen(self.url + world["files"]["calibration"]) as response:
+            calibration = json.load(response)
+        self.assertEqual(calibration["source_frame"]["sha256"], hashlib.sha256(body).hexdigest())
+        route_url = world["cases"][0]["files"]["waypoints"]
+        with urlopen(self.url + route_url) as response:
+            route = json.load(response)
+        self.assertEqual((route["coordinate_frame"], route["unit"], route["waypoint_target"]),
+                         ("world", "cm", "parking_center"))
+        self.assertFalse(route["occupancy_checked"])
+        path = self.output / route_url.removeprefix("/captures/")
+        self.assertEqual(load_route(path, require_verified=True).map_id, DEFAULT_MAP.map_id)
+
+        layout["markers_cm"]["E"] = [58.0, 48.19]
+        with self.post(body) as response:
+            failed_world = json.load(response)
+        self.assertEqual(failed_world["route_generation"]["status"], "generated")
+        self.assertEqual(failed_world["world_calibration"]["status"], "failed")
+        self.assertFalse(path.exists())
 
     def ocr_report(self, path, _python, output, _score):
         body = path.read_bytes()

@@ -6,7 +6,6 @@ from hashlib import sha256
 import json
 from multiprocessing import get_context
 from pathlib import Path
-import re
 import subprocess
 import sys
 from tempfile import NamedTemporaryFile, TemporaryDirectory, mkdtemp
@@ -18,7 +17,7 @@ from scripts.ocr_buildings import LABEL_IDS
 from src.map_processing.graph_exporter import build_road_graph, save_graph
 from src.map_processing.map_config import (
     BASE_DIR, DEFAULT_MAP_ID, DEFAULT_OUTPUT_ROOT, OCR_ID_REVISION, OCR_LABEL_SCHEME,
-    MapConfig, map_paths,
+    MapConfig, map_paths, validate_map_id,
 )
 from src.map_processing.semantic_mapper import create_semantic_map
 
@@ -66,11 +65,13 @@ def labels_from_report(report, map_id, image_digest):
     }
 
 
-def run_ocr(image_path, ocr_python, output_dir, min_score):
+def run_ocr(image_path, ocr_python, output_dir, min_score, *, low_light=False):
+    command = [str(ocr_python), "-B", "-X", "utf8", "-m", "scripts.ocr_buildings",
+               "--image", str(image_path), "--output-dir", str(output_dir), "--min-score", str(min_score)]
+    if low_light:
+        command.append("--low-light")
     result = subprocess.run(
-        [str(ocr_python), "-B", "-X", "utf8", "-m", "scripts.ocr_buildings",
-         "--image", str(image_path), "--output-dir", str(output_dir), "--min-score", str(min_score)],
-        cwd=BASE_DIR, check=False,
+        command, cwd=BASE_DIR, check=False,
     )
     reports = list(output_dir.glob("*/report.json"))
     if result.returncode not in (0, 2) or len(reports) != 1:
@@ -198,7 +199,8 @@ def capture_png(camera_index):
 
 
 def generate_map(config, ocr_python, *, replace=False, min_score=0.75,
-                 ocr_output_root=OCR_OUTPUT_ROOT, preparation_path=None, camera_index=None):
+                 ocr_output_root=OCR_OUTPUT_ROOT, preparation_path=None, camera_index=None,
+                 low_light=False):
     destinations = (config.label_path, config.graph_path, config.preview_path, config.semantic_path)
     if camera_index is not None:
         destinations += (config.image_path,)
@@ -219,7 +221,8 @@ def generate_map(config, ocr_python, *, replace=False, min_score=0.75,
         root = Path(scratch)
         staged = MapConfig(config.map_id, root / config.image_path.name, root / config.label_path.name, root / "map")
         staged.image_path.write_bytes(image_bytes)
-        report = run_ocr(staged.image_path, ocr_python, diagnostics, min_score)
+        ocr_options = {"low_light": True} if low_light else {}
+        report = run_ocr(staged.image_path, ocr_python, diagnostics, min_score, **ocr_options)
         labels = labels_from_report(report, config.map_id, digest)
         corners = find_paper_corners(config.image_path, digest, report["image_size_px"], preparation_path)
         if corners is not None:
@@ -230,7 +233,7 @@ def generate_map(config, ocr_python, *, replace=False, min_score=0.75,
         create_semantic_map(
             image_path=staged.image_path, graph_path=staged.graph_path,
             label_path=staged.label_path, output_path=staged.semantic_path,
-            expected_map_id=config.map_id,
+            expected_map_id=config.map_id, low_light=low_light,
         )
         sources = (staged.label_path, staged.graph_path, staged.preview_path, staged.semantic_path)
         if camera_index is not None:
@@ -272,12 +275,10 @@ def main():
     parser.add_argument("--min-score", type=float, default=0.75)
     parser.add_argument("--replace", action="store_true", help="검증 성공 시 같은 ID의 결과와 촬영 PNG 갱신")
     args = parser.parse_args()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.map_id):
-        parser.error("--map-id에는 영문자, 숫자, 밑줄, 하이픈만 사용하세요.")
     if args.camera is not None and args.camera < 0:
         parser.error("--camera에는 0 이상의 카메라 번호를 입력하세요.")
-    config = map_paths(args.map_id, output_root=args.output_dir.resolve())
     try:
+        config = map_paths(validate_map_id(args.map_id), output_root=args.output_dir.resolve())
         generate_map(
             config, args.ocr_python.resolve(), replace=args.replace, min_score=args.min_score,
             preparation_path=args.paper_preparation, camera_index=args.camera,

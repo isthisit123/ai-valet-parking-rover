@@ -7,12 +7,14 @@ from src.map_processing.map_identity import map_identity
 from .tracking import AXES, WORLD_ORIGIN, Route, load_route, number
 
 
-def save_world_route(source, output, route, *, verified=False):
+def save_world_route(source, output, route, *, verified=False, waypoint_target=None):
     original = json.loads(source.read_text(encoding="utf-8-sig"))
     metadata = ("case_id", "preference", "parking_type", "parking_space_id",
                 "start_node_id", "destination_node_id", "node_route",
-                "occupancy_status", "occupancy_observed_at")
+                "occupancy_status", "occupancy_observed_at", "planning_mode", "occupancy_checked")
     data = {key: original[key] for key in metadata if key in original}
+    if waypoint_target is not None:
+        data["waypoint_target"] = waypoint_target
     data.update(map_identity(original))
     data.update(
         map_id=route.map_id,

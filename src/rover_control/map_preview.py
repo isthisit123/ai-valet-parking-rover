@@ -5,13 +5,15 @@ from math import dist
 from pathlib import Path
 
 import cv2
+import networkx as nx
 import numpy as np
 
-from src.map_processing.map_config import get_map_config
+from src.map_processing.floor_markers import calibrate_markers, evaluate_check
 from src.map_processing.map_identity import configured_map_identity, map_identity, require_map_identity
+from src.map_processing.parking_selector import get_region_by_id, load_parking_map
 from src.map_processing.planar_calibration import fit_floor_transform, load_world_to_image, project_points, quadrilateral
-from .route_preview import route_segments
-from .tracking import AXES, WORLD_ORIGIN, Route, parking_center_pixel
+from .route_preview import route_segments, save_world_route
+from .tracking import AXES, WORLD_ORIGIN, Route, parking_center_pixel, route_map_config
 
 
 def read_json(path):
@@ -26,6 +28,65 @@ def read_floor_points(path, map_id, image_bytes):
     if image_hash is not None and image_hash != sha256(image_bytes).hexdigest():
         raise ValueError("기준점을 지정한 사진과 현재 지도 이미지가 다릅니다.")
     return spec
+
+
+def capture_floor_points(config, image, layout, *, max_error_cm):
+    if layout["map_id"] != config.map_id:
+        raise ValueError("기준점 설정과 촬영 지도의 map_id가 다릅니다.")
+    if "junction_check" in layout and "E" in layout["markers_cm"]:
+        raise ValueError("확인점은 빨간 십자 E 또는 도로 교점 중 하나를 지정하세요.")
+    points, report = calibrate_markers(image, layout, max_error_cm=max_error_cm)
+    digest = sha256(config.image_path.read_bytes()).hexdigest()
+    points["image_sha256"] = digest
+    report["source_frame"].update(image=config.image_path.name, sha256=digest)
+    return points, report
+
+
+def parking_junction_pixel(config, parking_space_id):
+    semantic, graph = load_parking_map(config.semantic_path, config=config)
+    entrance, exit_node, parking = (
+        get_region_by_id(semantic, facility)["node_id"]
+        for facility in ("entrance", "exit", parking_space_id)
+    )
+    try:
+        main_road = nx.shortest_path(graph, entrance, exit_node, weight="weight")
+        from_parking = [nx.shortest_path(graph, parking, gate, weight="weight")
+                        for gate in (entrance, exit_node)]
+    except (nx.NetworkXNoPath, nx.NodeNotFound) as error:
+        raise ValueError(f"{parking_space_id}에서 EN–EX 도로로 연결되는 경로가 없습니다.") from error
+    main_nodes = set(main_road)
+    joins = [next(node for node in path if node in main_nodes) for path in from_parking]
+    junction = joins[0]
+    if (junction != joins[1] or junction == parking or junction not in main_road[1:-1]
+            or len(graph[junction]) < 3 or graph.nodes[junction]["type"] != "junction"):
+        raise ValueError(f"{parking_space_id} 도로가 EN–EX 도로에 합류하는 교점을 하나로 찾을 수 없습니다.")
+    node = graph.nodes[junction]
+    return [node["x"], node["y"]]
+
+
+def verify_junction(config, spec, report, check):
+    if not isinstance(check, dict) or not isinstance(check.get("parking_space_id"), str):
+        raise ValueError("도로 확인점에 parking_space_id와 실측 world_cm을 지정하세요.")
+    parking_space_id = check["parking_space_id"]
+    if not parking_space_id.startswith("space_"):
+        raise ValueError("도로 확인점에는 주차칸 ID(space_…)가 필요합니다.")
+    world_cm = np.asarray(check["world_cm"], dtype=float)
+    outer_cm = np.float32([point["world_cm"] for point in spec["control_points"]])
+    if (world_cm.shape != (2,) or not np.isfinite(world_cm).all()
+            or cv2.pointPolygonTest(outer_cm, tuple(world_cm), False) <= 0):
+        raise ValueError("도로 확인점의 실측 [x, y] cm는 A~D 안쪽이어야 합니다.")
+    pixel = parking_junction_pixel(config, parking_space_id)
+    outer_px = np.float32([point["pixel"] for point in spec["control_points"]])
+    if cv2.pointPolygonTest(outer_px, tuple(pixel), False) <= 0:
+        raise ValueError("사진에서 찾은 도로 확인점이 십자 A~D 밖에 있습니다.")
+    candidate = report["candidate_image_to_world"]
+    validation = evaluate_check(pixel, world_cm, np.asarray(candidate),
+                                tolerance_cm=report["validation"]["tolerance_cm"],
+                                method="independent_road_junction")
+    validation.update(parking_space_id=parking_space_id, pixel=pixel, world_cm=world_cm.tolist())
+    report["validation"] = validation
+    if validation["passed"]:
+        report["image_to_world"] = report.pop("candidate_image_to_world")
 
 
 def floor_transform(map_id, image_bytes, image_size, *, points=None, calibration=None):
@@ -187,6 +248,23 @@ def export_cm_map(image, matrix, data, route_name, output_dir):
     return json_path, png_path
 
 
+def export_cm_routes(semantic, image, matrix, size, pixel_routes, preview_dir, world_dir, *, verified):
+    if verified:
+        world_dir.mkdir(parents=True, exist_ok=True)
+    for source in pixel_routes:
+        data = build_map(semantic, read_json(source), matrix, size, verified=verified)
+        json_path, png_path = export_cm_map(image, matrix, data, source.stem, preview_dir)
+        print(f"{source.stem}: {data['route']['total_distance_cm']:.2f} cm")
+        print(f"  PNG: {png_path}")
+        print(f"  JSON: {json_path}")
+        if verified:
+            route_path = world_dir / f"{source.stem}_cm.json"
+            route = Route(semantic["map_id"], data["route"]["waypoints_cm"])
+            save_world_route(source, route_path, route, verified=True, waypoint_target="parking_center")
+            print(f"  검증된 cm 경로: {route_path}")
+    return preview_dir
+
+
 def main():
     parser = argparse.ArgumentParser(description="cm 좌표계의 지도 PNG와 확인용 JSON을 저장합니다.")
     parser.add_argument("--route", type=Path, required=True)
@@ -197,7 +275,7 @@ def main():
     args = parser.parse_args()
     try:
         route = read_json(args.route)
-        config = get_map_config(route["map_id"])
+        config = route_map_config(args.route, route["map_id"])
         source_image = config.image_path.read_bytes()
         image = cv2.imdecode(np.frombuffer(source_image, np.uint8), cv2.IMREAD_COLOR)
         if image is None:

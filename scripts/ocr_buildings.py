@@ -158,7 +158,7 @@ def merge_overlapping_glyphs(records):
     return merged
 
 
-def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diagnostics=None):
+def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diagnostics=None, low_light=False):
     diagnostics = diagnostics if diagnostics is not None else []
     # RapidOCR는 직전 호출에서 지정한 실행 모드를 유지한다.
     output = engine(image, use_det=True, use_cls=True, use_rec=True)
@@ -173,10 +173,10 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
     # 기존 함수만 재사용하며 힌트/기존 시설 위치는 입력하지 않는다.
     from src.map_processing.semantic_mapper import detect_regions, extract_dark_regions
     from src.map_processing.map_config import REAL_DARK_RETRY_VALUE_LIMITS, REAL_MAP_ID
-    normal, accessible, dark, _ = detect_regions(image, map_id=REAL_MAP_ID)
+    normal, accessible, dark, _ = detect_regions(image, map_id=REAL_MAP_ID, low_light=low_light)
     dark_ids = {*BUILDING_IDS, "entrance", "exit"}
     recognized_ids = {identify_label(r["text"]) for r in records if r["score"] >= min_score}
-    if not dark_ids.issubset(recognized_ids):
+    if not low_light and not dark_ids.issubset(recognized_ids):
         # 회색 바닥과 붙어 기본 후보에서 탈락한 건물도 실제 검출 영역을 잘라 읽는다.
         # 시설 매칭과 같은 재검출 기준을 사용하며, OCR로 읽은 ID만 채택한다.
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -234,7 +234,7 @@ def collect_records(engine, image, *, min_score=0.75, region_fallback=True, diag
     return merge_overlapping_glyphs(records)
 
 
-def recognize_labels(engine, image, *, min_score, buildings_only, region_fallback):
+def recognize_labels(engine, image, *, min_score, buildings_only, region_fallback, low_light=False):
     height, width = image.shape[:2]
     orientations = ((0, None), (90, cv2.ROTATE_90_CLOCKWISE), (270, cv2.ROTATE_90_COUNTERCLOCKWISE))
     best_report, best_count = None, -1
@@ -242,7 +242,7 @@ def recognize_labels(engine, image, *, min_score, buildings_only, region_fallbac
         view = image if rotation is None else cv2.rotate(image, rotation)
         diagnostics = []
         records = collect_records(engine, view, min_score=min_score, region_fallback=region_fallback,
-                                  diagnostics=diagnostics)
+                                  diagnostics=diagnostics, low_light=low_light)
         # OCR만 회전시킨다. 힌트와 미리보기 좌표는 원본 PNG 좌표로 되돌린다.
         for record in records:
             points = record["polygon_px"]
@@ -262,7 +262,7 @@ def recognize_labels(engine, image, *, min_score, buildings_only, region_fallbac
     return best_report
 
 
-def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region_fallback=True):
+def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region_fallback=True, low_light=False):
     if not math.isfinite(min_score) or not 0 <= min_score <= 1:
         raise ValueError("최소 OCR 신뢰도는 0~1 범위여야 합니다.")
     image_bytes = image_path.read_bytes()
@@ -275,10 +275,11 @@ def run(image_path, output_root, *, min_score=0.75, buildings_only=False, region
         raise RuntimeError("OCR 전용 .venv-ocr 환경에 requirements-ocr.txt를 설치한 뒤 실행하세요.") from exc
     engine = RapidOCR(params={"Global.text_score": 0.0})
     report = recognize_labels(engine, image, min_score=min_score, buildings_only=buildings_only,
-                              region_fallback=region_fallback)
+                              region_fallback=region_fallback, low_light=low_light)
     report.update(engine="RapidOCR", source_file_name=image_path.name,
                   source_sha256=hashlib.sha256(image_bytes).hexdigest(),
-                  processed_at=datetime.now(timezone.utc).isoformat(), region_fallback=region_fallback)
+                  processed_at=datetime.now(timezone.utc).isoformat(), region_fallback=region_fallback,
+                  low_light=low_light)
     folder = output_root / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ_") + uuid.uuid4().hex[:8])
     folder.mkdir(parents=True, exist_ok=False)
     (folder / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -310,11 +311,13 @@ def main():
     parser.add_argument("--min-score", type=float, default=0.75, help="초기 실험 기준이며 현장 검증 필요")
     parser.add_argument("--buildings-only", action="store_true", help="현재 A/B만 붙였다면 두 건물만 필수로 검사")
     parser.add_argument("--no-region-fallback", action="store_true", help="색상 영역 보완 인식 없이 전체 이미지 OCR만 실행")
+    parser.add_argument("--low-light", action="store_true", help="어두운 실물 사진용 색상 영역 기준")
     parser.add_argument("--allow-single-letter", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         report = run(args.image, args.output_dir, min_score=args.min_score,
-                     buildings_only=args.buildings_only, region_fallback=not args.no_region_fallback)
+                     buildings_only=args.buildings_only, region_fallback=not args.no_region_fallback,
+                     low_light=args.low_light)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"OCR 실행 실패: {exc}\n")
     # 하나라도 누락/중복이면 결과는 남기고 성공 종료는 하지 않는다.

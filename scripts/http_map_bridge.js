@@ -55,10 +55,19 @@
             if (result.latest_preserved) {
                 status.textContent += `\n직전 성공 결과 유지: ${result.latest_output_directory}`;
             }
+            const world = result.world_calibration;
+            if (world?.status === 'verified') {
+                status.textContent += `\ncm 보정 검증 통과 · 확인점 오차 ${world.validation.max_held_out_error_cm.toFixed(2)} cm`;
+            } else if (world?.status === 'estimated') {
+                status.textContent += '\ncm 추정 미리보기 생성 · 독립 확인점 필요';
+            } else if (world?.status === 'failed') {
+                status.textContent += `\ncm 보정 실패: ${world.error}`;
+            }
             const labels = {source: '받은 PNG', map: '처리된 지도', labels: 'OCR 힌트 JSON',
                 ocr_report: 'OCR 보고서', ocr_preview: 'OCR 미리보기',
-                preview: '그래프 미리보기', graph: '그래프 JSON', semantic: '의미 지도 JSON'};
-            for (const [key, url] of Object.entries(result.files || {})) {
+                preview: '그래프 미리보기', graph: '그래프 JSON', semantic: '의미 지도 JSON',
+                calibration: '보정 보고서', floor_points: '자동 기준점 JSON'};
+            for (const [key, url] of Object.entries({...result.files, ...world?.files})) {
                 const link = document.createElement('a');
                 link.href = url;
                 link.target = '_blank';
@@ -84,6 +93,7 @@
                     '04_building_b_accessible': 'B 건물 가까운 장애인석',
                     '05_entrance_accessible': '입구 가까운 장애인석',
                 };
+                const worldCases = new Map((world?.cases || []).map(route => [route.case_id, route.files]));
                 for (const route of routeResult.cases) {
                     const row = document.createElement('div');
                     row.style.cssText = 'display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:12px 0;';
@@ -91,11 +101,15 @@
                     const space = route.parking_space_id.replace(/^space_(\d+)$/, 'P$1');
                     summary.textContent = `${names[route.case_id] || route.case_id} → ${space} · ${route.total_distance.toFixed(2)} px`;
                     row.append(summary);
+                    const worldFiles = worldCases.get(route.case_id);
                     for (const [label, url, download] of [
                         ['PNG 보기', route.files.preview, false],
                         ['PNG 저장', route.files.preview, true],
                         ['waypoint JSON 저장', route.files.waypoints, true],
+                        ['cm 지도 보기', worldFiles?.preview, false],
+                        ['cm 경로 JSON 저장', worldFiles?.waypoints, true],
                     ]) {
+                        if (!url) continue;
                         const link = document.createElement('a');
                         link.textContent = label;
                         link.href = url;

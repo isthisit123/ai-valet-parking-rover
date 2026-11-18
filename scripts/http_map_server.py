@@ -6,7 +6,6 @@ import hashlib
 import importlib.util
 import json
 import math
-import re
 import struct
 import threading
 import time
@@ -23,12 +22,13 @@ import networkx as nx
 import numpy as np
 
 from src.map_processing.graph_exporter import build_road_graph, save_graph
-from src.map_processing.map_config import BASE_DIR, DEFAULT_MAP, MapConfig
+from src.map_processing.map_config import BASE_DIR, DEFAULT_MAP, MapConfig, validate_map_id
 from src.map_processing.semantic_mapper import detect_regions, map_semantics, mask_paper_background
 from src.map_processing.path_visualizer import export_routes
 from scripts.generate_map import default_ocr_python, generate_map as generate_ocr_map
 from src.rover_control.aruco_tracker import ArucoTracker
 from src.rover_control.arrival_test import ArrivalTest
+from src.rover_control.map_preview import capture_floor_points, export_cm_routes, read_json, verify_junction
 
 
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
@@ -178,10 +178,51 @@ def export_capture_routes(config, capture_id):
             "coordinate_frame": "map_image", "unit": "pixel", "cases": cases}
 
 
+def export_capture_world(config, image, semantic, routes, layout, max_error_cm, url):
+    points, calibration = capture_floor_points(config, image, layout, max_error_cm=max_error_cm)
+    if "junction_check" in layout:
+        verify_junction(config, points, calibration, layout["junction_check"])
+    validation = calibration["validation"]
+    verified = validation["passed"]
+    failed = not verified and validation["method"] != "no_independent_check"
+    result = {"status": "verified" if verified else "failed" if failed else "estimated",
+              "validation": validation,
+              "files": {"calibration": url("world/map_calibration.json"),
+                        "floor_points": url("world/floor_points.json")}}
+    if failed:
+        error = validation["max_held_out_error_cm"]
+        result["error"] = f"확인점 E 오차 {error:.2f} cm가 허용값 {max_error_cm:g} cm를 초과했습니다."
+
+    # 사진·픽셀 경로와 같은 회차에서 cm 결과가 완성된 뒤 공개한다.
+    with TemporaryDirectory(prefix=".world-build-", dir=config.output_dir) as scratch:
+        world = Path(scratch) / "world"
+        world.mkdir()
+        write_json(world / "floor_points.json", points)
+        write_json(world / "map_calibration.json", calibration)
+        if not failed:
+            matrix = np.asarray(calibration["image_to_world" if verified else "candidate_image_to_world"])
+            paths = [config.output_dir / "routes" / f"{case['case_id']}.json" for case in routes["cases"]]
+            export_cm_routes(semantic, image, matrix, points["paper_size_cm"], paths,
+                             world / "cm_preview", world / "routes", verified=verified)
+        world.rename(config.output_dir / "world")
+
+    if not failed:
+        cases = []
+        for route in routes["cases"]:
+            case_id = route["case_id"]
+            files = {"preview": url(f"world/cm_preview/{case_id}_map_cm.png")}
+            if verified:
+                files["waypoints"] = url(f"world/routes/{case_id}_cm.json")
+            cases.append({"case_id": case_id, "files": files})
+        result["cases"] = cases
+    return result
+
+
 def _generate_map_attempt(body, output_root, *, labels_path=DEFAULT_MAP.label_path,
                  mapping_path=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json",
                  captured_at=None, ocr_python=None, min_score=0.75, legacy_hints=False,
-                 preparation_path=None, map_id=DEFAULT_MAP.map_id, camera_source=None):
+                 preparation_path=None, map_id=DEFAULT_MAP.map_id, camera_source=None,
+                 marker_layout=None, max_error_cm=1.0):
     if legacy_hints:
         return generate_legacy_map(body, output_root, labels_path=labels_path,
                                    mapping_path=mapping_path, captured_at=captured_at)
@@ -224,6 +265,13 @@ def _generate_map_attempt(body, output_root, *, labels_path=DEFAULT_MAP.label_pa
             # 의미 지도 생성 성공과 경로 검증 실패를 구분해 알려준다.
             report["route_generation"] = {"status": "failed", "error": str(exc),
                                           "planning_mode": "static_map", "occupancy_checked": False}
+    if marker_layout is not None and report.get("route_generation", {}).get("status") == "generated":
+        try:
+            report["world_calibration"] = export_capture_world(
+                config, image, semantic, report["route_generation"], marker_layout, max_error_cm, url,
+            )
+        except (ValueError, OSError, KeyError, TypeError, nx.NetworkXException, np.linalg.LinAlgError, cv2.error) as exc:
+            report["world_calibration"] = {"status": "failed", "error": str(exc)}
     # 미인식일 때도 이름표별 상태와 미리보기를 웹에서 확인할 수 있게 한다.
     for path in sorted((folder / "ocr").glob("*/*/report.json")):
         ocr = json.loads(path.read_text(encoding="utf-8"))
@@ -301,6 +349,7 @@ def generate_map(body, output_root, **options):
 
 def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=None, *,
                 ocr_python=None, min_score=0.75, legacy_hints=False, preparation_path=None,
+                marker_layout=None, max_error_cm=1.0,
                 map_id=DEFAULT_MAP.map_id, rover_marker_id=7, aruco_dictionary="DICT_4X4_50",
                 aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None):
     tracker = ArucoTracker(marker_id=rover_marker_id, dictionary=aruco_dictionary,
@@ -452,7 +501,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 report = generate_map(body, output_root, labels_path=labels_path, mapping_path=mapping_path,
                                       captured_at=self.headers.get("X-Captured-At"), ocr_python=ocr_python,
                                       min_score=min_score, legacy_hints=legacy_hints,
-                                      preparation_path=preparation_path, map_id=map_id, camera_source=self.camera_source())
+                                      preparation_path=preparation_path, map_id=map_id, camera_source=self.camera_source(),
+                                      marker_layout=marker_layout, max_error_cm=max_error_cm)
                 self.send_json(200 if report["status"] == "map_generated" else 422, report)
             except (ValueError, OSError) as exc:
                 self.send_json(400, {"error": str(exc)})
@@ -474,6 +524,8 @@ def main():
     parser.add_argument("--min-score", type=float, default=0.75)
     parser.add_argument("--map-id", default=DEFAULT_MAP.map_id)
     parser.add_argument("--paper-preparation", type=Path, help="수신 PNG와 해시가 일치하는 종이 외곽 설정")
+    parser.add_argument("--marker-layout", type=Path, help="같은 캡처에서 cm 지도를 만들 빨간 십자 실측 JSON")
+    parser.add_argument("--max-error-cm", type=float, default=1.0, help="확인점 E의 허용 오차")
     parser.add_argument("--legacy-hints", action="store_true", help="기존 구도용 힌트·외곽 설정 사용 (기본: 새 PNG의 OCR)")
     parser.add_argument("--rover-marker-id", type=int, default=7)
     parser.add_argument("--aruco-dictionary", default="DICT_4X4_50")
@@ -485,14 +537,25 @@ def main():
         parser.error("--min-score는 0~1 범위여야 합니다.")
     if not 50 <= args.aruco_period_ms <= 1000 or not math.isfinite(args.marker_front_offset_deg):
         parser.error("ArUco 주기는 50~1000ms, 전방 보정각은 유한한 숫자여야 합니다.")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", args.map_id):
-        parser.error("--map-id에는 영문자, 숫자, 밑줄, 하이픈만 사용하세요.")
+    try:
+        map_id = validate_map_id(args.map_id)
+        marker_layout = read_json(args.marker_layout) if args.marker_layout else None
+        if marker_layout is not None:
+            if args.legacy_hints:
+                raise ValueError("--marker-layout은 OCR 지도 생성 모드에서 사용하세요.")
+            if marker_layout["map_id"] != map_id:
+                raise ValueError("--marker-layout의 map_id는 --map-id와 일치해야 합니다.")
+            if not math.isfinite(args.max_error_cm) or args.max_error_cm <= 0:
+                raise ValueError("--max-error-cm은 양수여야 합니다.")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        parser.error(str(error))
     if not (args.web_root / "index.html").is_file():
         parser.error("--web-root에 ParkingHaeven/Source 경로를 지정하세요.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     handler = handler_for(args.web_root.resolve(), args.output_dir.resolve(), args.labels, args.mapping, args.aruco_helper,
                           ocr_python=args.ocr_python.resolve(), min_score=args.min_score, legacy_hints=args.legacy_hints,
-                          preparation_path=args.paper_preparation, map_id=args.map_id,
+                          preparation_path=args.paper_preparation, map_id=map_id,
+                          marker_layout=marker_layout, max_error_cm=args.max_error_cm,
                           rover_marker_id=args.rover_marker_id, aruco_dictionary=args.aruco_dictionary,
                           aruco_period_ms=args.aruco_period_ms, marker_front_offset_deg=args.marker_front_offset_deg,
                           arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json")

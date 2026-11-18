@@ -1,0 +1,14 @@
+{
+  "map_id": "parking_map_real",
+  "paper_size_cm": [109.5, 79],
+  "markers_cm": {
+    "A": [7.5, 18.5],
+    "B": [87, 30],
+    "C": [103.5, 67],
+    "D": [16.5, 48.5]
+  },
+  "junction_check": {
+    "parking_space_id": "space_5",
+    "world_cm": [61, 39.5]
+  }
+}

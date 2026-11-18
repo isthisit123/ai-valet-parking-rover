@@ -3,7 +3,7 @@ import json
 import cv2
 import numpy as np
 
-from .graph_builder import remove_small_components
+from .graph_builder import line_pixels, remove_small_components
 from .map_config import create_map_parser, get_map_config
 from .map_reader import detect_road_mask, load_map_image
 from .map_identity import AXES, map_identity, require_map_identity
@@ -53,14 +53,10 @@ def connect_waypoints(graph, node_route, road_mask):
             raise ValueError(f"간선의 좌표 양끝이 도로 노드와 일치하지 않습니다. {start} → {end}")
 
         # 간선 사이의 공통점은 한 번만 기록하고 빈 픽셀 구간은 선분을 따라 채운다.
-        for (x, y), (next_x, next_y) in zip(path, path[1:]):
-            dx, dy = next_x - x, next_y - y
-            steps = max(abs(dx), abs(dy))
-            for step in range(1, steps + 1):
-                waypoints.append((
-                    round(x + dx * step / steps),
-                    round(y + dy * step / steps),
-                ))
+        for start_px, end_px in zip(path, path[1:]):
+            pixels = line_pixels(start_px, end_px)
+            next(pixels)
+            waypoints.extend(pixels)
 
     height, width = road_mask.shape
     for x, y in waypoints:

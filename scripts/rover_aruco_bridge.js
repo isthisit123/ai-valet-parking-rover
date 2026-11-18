@@ -8,6 +8,11 @@ export class ArUcoBridge {
         this.panel.style.cssText = 'white-space:pre-wrap;background:#111827;color:#a7f3d0;padding:12px;margin:12px;border:1px solid #475569;';
         this.panel.textContent = '로버 ArUco: 카메라 대기 중';
         document.body.appendChild(this.panel);
+        const debug = document.createElement('a');
+        debug.href = '/api/aruco-frame?miss=1'; debug.target = '_blank'; debug.rel = 'noopener';
+        debug.textContent = '마커 누락 원본 영상 확인';
+        debug.style.cssText = 'display:block;margin:8px 12px;color:#7dd3fc;text-decoration:underline;';
+        document.body.appendChild(debug);
         this.periodMs = 100;
         this.frameId = 0;
         this.lastReceivedAt = null;
@@ -53,7 +58,7 @@ export class ArUcoBridge {
             const capturedAt = new Date().toISOString();
             const captureStarted = performance.now();
             // 지도 생성은 PNG를 유지하고 추적 프레임만 용량이 작은 JPEG로 보낸다.
-            const blob = await new Promise(resolve => this.canvas.toBlob(resolve, 'image/jpeg', 0.85));
+            const blob = await new Promise(resolve => this.canvas.toBlob(resolve, 'image/jpeg', 0.92));
             if (!blob) throw new Error('카메라 프레임 생성 실패');
             if (!sameSource()) throw new Error('프레임 생성 중 카메라가 변경됐습니다.');
             const encodingMs = performance.now() - captureStarted;
@@ -90,6 +95,8 @@ export class ArUcoBridge {
                 `목표 ${this.periodMs}ms / 실제 응답 간격 ${interval === null ? '측정 중' : interval.toFixed(0) + 'ms'} / 검출 ${data.processing_ms.toFixed(1)}ms`,
                 `JPEG 인코딩 ${encodingMs.toFixed(1)}ms / 전송·응답 ${data.request_ms.toFixed(1)}ms / 서버 검출 ${data.server_detection_status} · 유효성 ${data.server_tracking_status}`,
             ];
+            if (data.recent_detection) lines.push(`최근 ${data.recent_detection.frames}프레임 ID 검출률 ${(data.recent_detection.ratio * 100).toFixed(0)}% · 방법 ${data.detection_method}`);
+            if (data.fallback_budget_exhausted) lines.push('재검출 시간 예산 소진: 일부 보완 검출을 실행하지 못했습니다. 누락 원본과 서버 처리 시간을 확인하세요.');
             if (data.rover) {
                 lines.push(`마커 중심 x=${data.rover.center_px[0].toFixed(1)}, y=${data.rover.center_px[1].toFixed(1)} px`,
                     `로버 영상 방향각 ${data.rover.heading_deg.toFixed(1)}° (오른쪽 0°, 시계 방향 +)`);

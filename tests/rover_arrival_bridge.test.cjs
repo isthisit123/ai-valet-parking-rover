@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 async function fixture() {
-    const elements = [], timers = [], requests = [], drawing = [];
+    const elements = [], timers = [], requests = [], drawing = [], contexts = [];
     let state = {status: 'idle'};
     let clock = 10;
     const catalog = {ready: true, capture_id: 'map-capture', map_image_sha256: 'hash', image_size_px: [400, 400],
@@ -16,9 +16,12 @@ async function fixture() {
         const e = {tag, value: '', style: {}, children: [], listeners: {}, replaceCount: 0,
             append(...items) {this.children.push(...items);}, replaceChildren() {this.children = []; this.replaceCount++;},
             addEventListener(type, callback) {this.listeners[type] = callback;},
-            getContext: () => ({clearRect() {drawing.length = 0;}, drawImage() {},
-                beginPath() {}, stroke() {}, fill() {}, moveTo() {}, lineTo() {},
-                arc: (...args) => drawing.push(args)})};
+            getContext() {
+                const ctx = {segments: 0, clearRect() {drawing.length = 0; this.segments = 0;}, drawImage() {},
+                    beginPath() {}, stroke() {}, fill() {}, moveTo() {}, lineTo() {this.segments++;},
+                    arc: (...args) => drawing.push(args)};
+                contexts.push(ctx); return ctx;
+            }};
         elements.push(e); return e;
     }
     const context = {document: {createElement, createTextNode: text => ({textContent: text}), body: createElement('body')},
@@ -41,7 +44,7 @@ async function fixture() {
     cases.value = '03_exit';
     await cases.listeners.change();
     await new Promise(resolve => setImmediate(resolve));
-    return {catalog, requests, drawing, timers, cases, spaces, elements, context, tick: value => {clock = value;},
+    return {catalog, requests, drawing, contexts, timers, cases, spaces, elements, context, tick: value => {clock = value;},
         status: elements.find(e => e.tag === 'pre'), start: elements.find(e => e.textContent === '테스트 시작'),
         setState: next => {state = next;}};
 }
@@ -143,4 +146,18 @@ test('arrival commitment and own-rover exclusion are shown without changing the 
     assert.match(f.status.textContent, /목표 P4/);
     assert.match(f.status.textContent, /현재 목표 고정/);
     assert.ok(f.elements.some(e => e.tag === 'p' && /ArUco로 로버 본체 제외/.test(e.textContent || '')));
+});
+
+test('brief loss retains progress and draws only a gray reference point without route guidance', async () => {
+    const f = await fixture();
+    f.setState({status: 'holding', case_id: '03_exit', parking_space_id: 'space_4', goal_px: [320, 230],
+        radius_px: 20, guidance_available: false, tracking_paused: true, reason: 'tracking_gap_short',
+        current_position_px: null, last_known_position_px: [321, 230], held_seconds: 0.4, hold_seconds: 1,
+        waypoints: [[180, 150], [320, 230]], occupancy: {fresh: true, states: {space_4: 'free'}}});
+    await f.timers.shift()();
+    assert.match(f.status.textContent, /안정 유지 0.4 \/ 1s/);
+    assert.match(f.status.textContent, /일시정지/);
+    assert.equal(f.contexts[0].fillStyle, '#9ca3af');
+    assert.equal(f.contexts[0].segments, 0);
+    assert.equal(f.drawing.at(-1)[0], 321);
 });

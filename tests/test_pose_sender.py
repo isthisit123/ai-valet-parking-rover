@@ -17,6 +17,7 @@ import numpy as np
 from src.map_processing.map_identity import AXES, WORLD_ORIGIN
 from src.map_processing.planar_calibration import project_points
 from src.rover_control.drive import PoseReceiver
+from src.rover_control.aruco_tracker import ArucoTracker
 from src.rover_control.pose_sender import CapturePose, load_camera_position, main, save_camera_position, stream_pose
 from src.rover_control.tracking import Follower, Route
 
@@ -77,6 +78,40 @@ class PoseSenderTest(unittest.TestCase):
         pose = converter.convert(self.observation(heading=90))
         np.testing.assert_allclose([pose["x_cm"], pose["y_cm"]], [57, 42], atol=0.001)
         self.assertEqual(pose["position_reference"], "floor_projected_marker_with_offset")
+
+    def test_recovered_aruco_corners_keep_height_corrected_cm_and_strict_pose_expiry(self):
+        expected_corners = np.float32(self.observation()['rover']['corners_px'])
+        square = np.float32([[0, 0], [99, 0], [99, 99], [0, 99]])
+        marker = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), 7, 100)
+        warp = cv2.getPerspectiveTransform(square, expected_corners)
+        image = cv2.warpPerspective(marker, warp, (800, 600), flags=cv2.INTER_NEAREST, borderValue=255)
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        tracker = ArucoTracker()
+        baseline = tracker.observe(image, camera_source=self.camera, frame_id='first')
+        self.assertEqual(baseline['tracking_status'], 'detected')
+        camera = [53, 151.7, 111.5]
+        expected = CapturePose(self.folder, camera_position_cm=camera).convert(baseline)
+        native = tracker.detectors[0]
+
+        class NativeMiss:
+            def detectMarkers(self, view):
+                if view.shape[:2] == (600, 800):
+                    return [], None, []
+                return native.detectMarkers(view)
+
+        tracker.detectors = [NativeMiss(), NativeMiss()]
+        recovered = tracker.observe(image, camera_source=self.camera, frame_id='recovered')
+        self.assertEqual(recovered['detection_method'], 'roi_2x')
+        converter = CapturePose(self.folder, camera_position_cm=camera)
+        pose = converter.convert(recovered)
+        np.testing.assert_allclose([pose['x_cm'], pose['y_cm']], [expected['x_cm'], expected['y_cm']], atol=0.15)
+        self.assertLess(abs((pose['heading_deg'] - expected['heading_deg'] + 180) % 360 - 180), 2.5)
+        self.assertTrue(pose['height_correction_applied'])
+        self.assertEqual(converter.offset, (0, 0))
+        expired = {**recovered, 'received_monotonic_s': time.monotonic() - 0.21,
+                   'arrival_test': {'tracking_paused': True, 'last_known_position_px': [1, 2]}}
+        with self.assertRaisesRegex(ValueError, '0.20초'):
+            CapturePose(self.folder, camera_position_cm=camera).convert(expired)
 
     def test_height_correction_recovers_projected_3d_marker_and_axle_position(self):
         # 별도의 3D 핀홀 카메라로 영상을 합성해 높이·오프셋의 적용 순서를 검증한다.

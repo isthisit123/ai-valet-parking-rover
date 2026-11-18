@@ -13,6 +13,9 @@ import time
 from src.map_processing.map_identity import require_map_identity
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES
 
+TRACKING_GAP_GRACE_SECONDS = 0.40
+HOLD_PAUSE_BUDGET_SECONDS = 0.50
+
 
 class ArrivalTest:
     def __init__(self, map_root, *, marker_id=7, output_path=None, map_lock=None, parking=None):
@@ -24,6 +27,7 @@ class ArrivalTest:
         self.state = {"status": "idle", "planning_mode": "image_pixel_test", "motor_commands": False,
                       "coordinate_frame": "map_image", "unit": "pixel"}
         self.last_received = None
+        self.last_pose_expires = None
         self.last_frame = None
         self.hold_start = None
         self.anchor = None
@@ -31,6 +35,10 @@ class ArrivalTest:
         self.parking = parking
         self.parking_signature = None
         self.last_retarget = None
+        self.hold_observed = 0.0
+        self.hold_pause_total = 0.0
+        self.tracking_gap_seen = False
+        self.last_known_position = None
 
     def catalog(self, *, live=True):
         try:
@@ -123,14 +131,50 @@ class ArrivalTest:
                                   replan_count=0, target_changes=[])
                 self.parking_signature = self.last_retarget = None
             self.last_received = self.last_frame = None
+            self.last_pose_expires = None
+            self.tracking_gap_seen = False
+            self.last_known_position = None
+            self.state.update(tracking_paused=False, tracking_available=False, last_known_position_px=None)
             self._reset_hold()
             self._save()
             return self.current()
 
-    def _reset_hold(self):
+    def _reset_hold(self, reason=None):
+        # 성공 후에도 지연 원인을 확인할 수 있도록 실제 진행 중인 판정의 초기화만 센다.
+        self.state.setdefault("hold_reset_count", 0)
+        self.state.setdefault("hold_reset_counts", {})
+        self.state.setdefault("last_hold_reset", None)
+        if reason is not None and self.samples:
+            self.state["hold_reset_count"] += 1
+            counts = self.state["hold_reset_counts"]
+            counts[reason] = counts.get(reason, 0) + 1
+            self.state["last_hold_reset"] = {
+                "reason": reason, "held_seconds": self.hold_observed,
+                "sample_count": self.samples, "hold_pause_seconds": self.hold_pause_total,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
         self.hold_start = self.anchor = None
         self.samples = 0
-        self.state.update(held_seconds=0, sample_count=0)
+        self.hold_observed = self.hold_pause_total = 0.0
+        self.state.update(held_seconds=0, sample_count=0, hold_pause_seconds=0)
+
+    def _tracking_missing(self, now, reason, *, allow_grace=True):
+        age = now - self.last_received if self.last_received is not None else float("inf")
+        self.tracking_gap_seen = True
+        short = (allow_grace and 0 <= age <= TRACKING_GAP_GRACE_SECONDS + 1e-6 and
+                 (self.anchor is None or self.hold_pause_total + age <= HOLD_PAUSE_BUDGET_SECONDS + 1e-6))
+        self.state.update(current_position_px=None, distance_px=None, guidance_available=False,
+                          tracking_available=False, tracking_paused=short,
+                          tracking_gap_ms=round(age * 1000, 1) if isfinite(age) else None,
+                          last_known_position_px=deepcopy(self.last_known_position) if short else None)
+        if short:
+            self.state["reason"] = "tracking_gap_short"
+        else:
+            reset_reason = ("marker_identity_uncertain" if not allow_grace else
+                            "tracking_gap_too_long" if age > TRACKING_GAP_GRACE_SECONDS + 1e-6 else
+                            "hold_pause_budget_exceeded")
+            self._reset_hold(reset_reason)
+            self.state.update(status="waiting_for_tracking", reason=reason)
 
     def _save(self):
         if self.output_path is None:
@@ -149,8 +193,9 @@ class ArrivalTest:
 
     def stop(self, reason="user_stopped"):
         with self.lock:
-            self._reset_hold()
+            self._reset_hold(reason)
             self.state.update(status="stopped", reason=reason, current_position_px=None, distance_px=None)
+            self.state.update(last_known_position_px=None, tracking_paused=False, tracking_available=False)
             self.state["guidance_available"] = False
             self._save()
             return deepcopy(self.state)
@@ -168,8 +213,9 @@ class ArrivalTest:
             except (OSError, ValueError, KeyError):
                 unchanged = False
         if not unchanged:
-            self._reset_hold()
+            self._reset_hold("map_changed")
             self.state.update(status="invalidated", reason="map_changed", current_position_px=None, distance_px=None)
+            self.state.update(last_known_position_px=None, tracking_paused=False, tracking_available=False)
             self.state["guidance_available"] = False
             self._save()
 
@@ -180,11 +226,8 @@ class ArrivalTest:
             if self.parking is not None:
                 self._refresh_parking(now)
             if (self.state["status"] in ("running", "holding", "waiting_for_tracking") and
-                    self.last_received is not None and now - self.last_received > 0.20):
-                self._reset_hold()
-                self.state.update(status="waiting_for_tracking", reason="tracking_stale", current_position_px=None, distance_px=None)
-                if self.parking is not None:
-                    self.state["guidance_available"] = False
+                    self.last_pose_expires is not None and now > self.last_pose_expires):
+                self._tracking_missing(now, "tracking_stale")
                 self._save()
             return deepcopy(self.state)
 
@@ -196,7 +239,8 @@ class ArrivalTest:
             self.state["occupancy"] = live
             self.state["occupancy_observed_at"] = live["observed_at"]
             signature = (live["capture_id"], tuple(sorted(live["states"].items())))
-            fresh_pose = self.last_received is not None and 0 <= now - self.last_received <= 0.20
+            fresh_pose = (self.last_received is not None and self.last_pose_expires is not None
+                          and self.last_received <= now <= self.last_pose_expires)
             position = self.state.get("current_position_px") if fresh_pose else None
             pending = self.state.get("route_needs_position") and position is not None
             if signature == self.parking_signature and not pending:
@@ -218,7 +262,7 @@ class ArrivalTest:
                         self.parking_signature = None
                     return
             if changed or pending or self.state["status"] == "blocked":
-                self._reset_hold()
+                self._reset_hold("target_changed" if changed else "parking_route_changed")
                 self.state.update(plan, status="running" if position is not None else "waiting_for_tracking",
                                   radius_px=plan["arrival_region"]["radius_px"],
                                   stability_px=min(5.0, plan["arrival_region"]["radius_px"] / 3),
@@ -235,7 +279,7 @@ class ArrivalTest:
                     self.state["waypoints"] = []
                 self._save()
         except (ValueError, OSError, KeyError) as error:
-            self._reset_hold()
+            self._reset_hold("occupancy_blocked")
             self.state.update(status="blocked", reason=str(error), guidance_available=False,
                               route_needs_position=True, waypoints=[], distance_px=None)
             self._save()
@@ -247,8 +291,9 @@ class ArrivalTest:
             if self.state["status"] in ("idle", "stopped", "invalidated"):
                 return deepcopy(self.state)
             if observation.get("camera_source") != self.state["camera_source"]:
-                self._reset_hold()
+                self._reset_hold("camera_changed")
                 self.state.update(status="invalidated", reason="camera_changed", current_position_px=None, distance_px=None)
+                self.state.update(last_known_position_px=None, tracking_paused=False, tracking_available=False)
                 self.state["guidance_available"] = False
                 self._save()
                 return deepcopy(self.state)
@@ -259,37 +304,52 @@ class ArrivalTest:
             valid = (observation.get("tracking_status") == "detected" and rover and rover.get("id") == self.marker_id
                      and type(received) in (int, float) and isfinite(received) and 0 <= now - received <= 0.20)
             client_time = observation.get("client_captured_at")
+            capture_remaining = 0.20
             if client_time:
                 try:
                     parsed = datetime.fromisoformat(client_time.replace("Z", "+00:00"))
                     age = (datetime.now(timezone.utc) - parsed).total_seconds()
                     valid = valid and -0.05 <= age <= 0.20
+                    capture_remaining = min(0.20, 0.20 - age)
                 except (ValueError, TypeError):
                     valid = False
             if not valid:
-                self._reset_hold()
-                self.state.update(status="waiting_for_tracking", reason="tracking_unavailable", current_position_px=None, distance_px=None)
-                self.state["guidance_available"] = False
+                identity_uncertain = observation.get("tracking_status") == "ambiguous" or bool(rover and rover.get("id") != self.marker_id)
+                self._tracking_missing(now, "tracking_unavailable", allow_grace=not identity_uncertain)
                 self._save()
                 return deepcopy(self.state)
             source = self.state["camera_source"]
             if (observation.get("width"), observation.get("height")) != (source["width"], source["height"]):
-                self._reset_hold()
+                self._reset_hold("camera_resolution_changed")
                 self.state.update(status="invalidated", reason="camera_resolution_changed", current_position_px=None, distance_px=None)
+                self.state.update(last_known_position_px=None, tracking_paused=False, tracking_available=False)
                 self.state["guidance_available"] = False
                 self._save()
                 return deepcopy(self.state)
             frame_key = observation.get("frame_id") or received
             if frame_key == self.last_frame or (self.last_received is not None and received <= self.last_received):
                 return deepcopy(self.state)
-            if self.last_received is not None and received - self.last_received > 0.20:
-                self._reset_hold()
+            previous_received = self.last_received
+            had_gap = self.tracking_gap_seen or (previous_received is not None and received - previous_received > 0.20 + 1e-6)
+            gap = received - previous_received if previous_received is not None else 0
+            if had_gap and (gap > TRACKING_GAP_GRACE_SECONDS + 1e-6 or
+                            self.hold_pause_total + gap > HOLD_PAUSE_BUDGET_SECONDS + 1e-6):
+                self._reset_hold("tracking_gap_too_long" if gap > TRACKING_GAP_GRACE_SECONDS + 1e-6
+                                 else "hold_pause_budget_exceeded")
+            elif had_gap and self.anchor is not None:
+                self.hold_pause_total += gap
+            self.tracking_gap_seen = False
             self.last_frame, self.last_received = frame_key, received
+            # GET에서도 촬영 후 200ms를 넘긴 좌표를 유지하지 않는다. 수신 시각으로 TTL을 새로 시작하지 않는다.
+            self.last_pose_expires = min(received + 0.20, now + capture_remaining)
             x, y = rover["center_px"]
             if not all(type(v) in (int, float) and isfinite(v) for v in (x, y)):
                 raise ValueError("유한한 마커 중심 좌표가 필요합니다.")
             position = [x * self.state["image_size_px"][0] / source["width"],
                         y * self.state["image_size_px"][1] / source["height"]]
+            self.last_known_position = list(position)
+            self.state.update(tracking_available=True, tracking_paused=False, tracking_gap_ms=0,
+                              last_known_position_px=list(position))
             distance = dist(position, self.state["goal_px"])
             self.state.update(current_position_px=position, distance_px=distance)
             if self.parking is not None:
@@ -304,14 +364,17 @@ class ArrivalTest:
                 self.state.update(distance_px=distance, guidance_available=True)
             self.state.pop("reason", None)
             if distance > self.state["radius_px"]:
-                self._reset_hold()
+                self._reset_hold("outside_arrival_region")
                 self.state["status"] = "running"
             else:
                 if self.anchor is None or dist(position, self.anchor) > self.state["stability_px"]:
-                    self._reset_hold()
+                    self._reset_hold("position_unstable")
                     self.anchor, self.hold_start = position, received
+                elif not had_gap and previous_received is not None:
+                    self.hold_observed += min(0.20, max(0.0, received - previous_received))
                 self.samples += 1
-                self.state.update(status="holding", held_seconds=max(0, received - self.hold_start), sample_count=self.samples)
+                self.state.update(status="holding", held_seconds=self.hold_observed, sample_count=self.samples,
+                                  hold_pause_seconds=self.hold_pause_total)
                 if self.state["held_seconds"] >= self.state["hold_seconds"] and self.samples >= 5:
                     self.state.update(status="success", completed_at=datetime.now(timezone.utc).isoformat())
             self._save()

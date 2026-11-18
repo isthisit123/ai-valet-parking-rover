@@ -1,5 +1,6 @@
 from http.server import ThreadingHTTPServer
 import json
+import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
@@ -58,12 +59,29 @@ class ArucoHttpTest(unittest.TestCase):
             self.assertEqual(result["coordinate_frame"], "camera_image")
             self.assertIsNone(result["map_pose"])
             self.assertTrue(output.is_file())
+            with urlopen(url + '/api/aruco-debug') as response:
+                diagnostic = json.load(response)
+            self.assertEqual(diagnostic['image_sha256'], hashlib.sha256(encoded.tobytes()).hexdigest())
+            self.assertEqual(diagnostic['detection_status'], 'detected')
+            self.assertEqual(diagnostic['detection_attempt_details'][0]['decoded_ids'], [7])
+            self.assertIsInstance(diagnostic['fallback_budget_exhausted'], bool)
             _, jpeg = cv2.imencode('.jpg', marker_image(), [cv2.IMWRITE_JPEG_QUALITY, 85])
             with urlopen(Request(url + '/api/aruco', jpeg.tobytes(), {'Content-Type': 'image/jpeg'})) as response:
                 self.assertEqual(json.load(response)['rover']['id'], 7)
+            with urlopen(url + diagnostic['frame_url']) as response:
+                self.assertEqual(response.read(), encoded.tobytes())
             self.assertFalse((root / "maps").exists())
             with urlopen(url + "/api/rover-pose") as response:
                 self.assertIn(json.load(response)["tracking_status"], ("detected", "stale"))
+            missing = marker_image() * 0 + 255
+            _, missing_jpeg = cv2.imencode('.jpg', missing)
+            with urlopen(Request(url + '/api/aruco', missing_jpeg.tobytes(), {'Content-Type': 'image/jpeg'})) as response:
+                self.assertEqual(json.load(response)['detection_status'], 'lost')
+            with urlopen(url + '/api/aruco-debug?miss=1') as response:
+                failed = json.load(response)
+            self.assertEqual(failed['detection_status'], 'lost')
+            with urlopen(url + failed['frame_url']) as response:
+                self.assertEqual(response.read(), missing_jpeg.tobytes())
         finally:
             server.shutdown()
             thread.join()

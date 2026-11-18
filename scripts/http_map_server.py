@@ -15,7 +15,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from shutil import copy2, copytree
 from tempfile import TemporaryDirectory
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import cv2
 import networkx as nx
@@ -409,6 +409,7 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                            front_offset_deg=marker_front_offset_deg,
                            output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json")
     aruco_busy = threading.Lock()
+    aruco_frames = {"latest": None, "miss": None, "frozen": None}
     parking = LiveParking(output_root, map_lock=PUBLISH_LOCK,
                           output_path=occupancy_output_path or BASE_DIR / "data/rover_runs/occupancy/latest.json")
     arrival = ArrivalTest(output_root, marker_id=rover_marker_id, map_lock=PUBLISH_LOCK, parking=parking,
@@ -484,6 +485,29 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                                      "period_ms": aruco_period_ms, "front_offset_deg": marker_front_offset_deg})
             elif path == "/api/rover-pose":
                 self.send_json(200, {**tracker.current(), "arrival_test": arrival.current()})
+            elif path == "/api/aruco-debug":
+                kind = "miss" if parse_qs(urlsplit(self.path).query).get("miss") == ["1"] else "latest"
+                frame = aruco_frames[kind]
+                if frame is None:
+                    self.send_json(404, {"error": "카메라의 마커 프레임을 먼저 받으세요."})
+                    return
+                body, content_type, metadata = frame
+                digest = hashlib.sha256(body).hexdigest()
+                aruco_frames["frozen"] = (digest, frame)
+                self.send_json(200, {**metadata, "image_sha256": digest,
+                                     "frame_url": f"/api/aruco-frame?sha256={digest}"})
+            elif path == "/api/aruco-frame":
+                digest = parse_qs(urlsplit(self.path).query).get("sha256", [None])[0]
+                if digest:
+                    frozen = aruco_frames["frozen"]
+                    frame = frozen[1] if frozen and frozen[0] == digest else None
+                else:
+                    kind = "miss" if parse_qs(urlsplit(self.path).query).get("miss") == ["1"] else "latest"
+                    frame = aruco_frames[kind]
+                if frame is None:
+                    self.send_json(404, {"error": "진단 프레임이 없습니다. 진단 정보를 다시 조회하세요."})
+                    return
+                self.send_bytes(200, frame[0], frame[1])
             elif path.startswith("/captures/"):
                 with PUBLISH_LOCK:
                     file_path = (output_root / path.removeprefix("/captures/")).resolve()
@@ -561,6 +585,16 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                     result = tracker.observe(decode_tracking_image(body, content_type), received_monotonic_s=received,
                                              client_captured_at=self.headers.get("X-Captured-At"),
                                              frame_id=self.headers.get("X-Frame-Id"), camera_source=self.camera_source())
+                    previous = aruco_frames["latest"]
+                    if previous and previous[2]["camera_source"] != result.get("camera_source"):
+                        aruco_frames["miss"] = aruco_frames["frozen"] = None
+                    aruco_frames["latest"] = (body, content_type, {key: result.get(key) for key in (
+                        "frame_id", "client_captured_at", "camera_source", "width", "height", "tracking_status",
+                        "detection_status", "detection_method", "detection_attempts", "recent_detection",
+                        "detection_attempt_details", "fallback_budget_exhausted",
+                        "processing_ms", "capture_age_ms", "rejected_candidate_count")})
+                    if result.get("detection_status") != "detected":
+                        aruco_frames["miss"] = aruco_frames["latest"]
                     result["arrival_test"] = arrival.observe(result)
                     self.send_json(200, result)
                 except (ValueError, OSError, cv2.error) as error:

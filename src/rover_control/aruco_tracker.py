@@ -1,6 +1,7 @@
 """웹 카메라 프레임에서 로버 상단 마커의 픽셀 위치와 영상 방향각을 구한다."""
 
 from copy import deepcopy
+from collections import deque
 from datetime import datetime, timezone
 import json
 from math import atan2, degrees, isfinite
@@ -14,6 +15,8 @@ import numpy as np
 
 
 MAX_AGE_SECONDS = 0.20
+ROI_HINT_SECONDS = 0.75
+FALLBACK_BUDGET_SECONDS = 0.10
 
 
 def marker_geometry(corners, front_offset_deg=0.0):
@@ -49,22 +52,78 @@ class ArucoTracker:
             parameters = cv2.aruco.DetectorParameters()
             parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
             parameters.adaptiveThreshConstant = threshold
+            parameters.perspectiveRemovePixelPerCell = 8
             self.detectors.append(cv2.aruco.ArucoDetector(codebook, parameters))
         self._latest = None
         self._lock = threading.RLock()
+        self._roi_hint = None
+        self._contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        self._recent = deque(maxlen=20)
+        self._source_context = None
+
+    def _detect(self, image, received, camera_source, started):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        best_corners, best_ids, method, rejected = [], [], "native", 0
+        attempts = []
+        details = []
+        budget_exhausted = False
+
+        def scan(view, name, *, scale=1.0, offset=(0, 0)):
+            nonlocal best_corners, best_ids, method, rejected, budget_exhausted
+            for index, detector in enumerate(self.detectors):
+                if name != "native" and time.perf_counter() - started > FALLBACK_BUDGET_SECONDS:
+                    budget_exhausted = True
+                    break
+                if name not in attempts:
+                    attempts.append(name)
+                scan_started = time.perf_counter()
+                corners, identities, discarded = detector.detectMarkers(view)
+                identities = [] if identities is None else identities.flatten().tolist()
+                details.append({"method": name, "detector_index": index,
+                                "duration_ms": (time.perf_counter() - scan_started) * 1000,
+                                "decoded_ids": identities, "rejected_candidate_count": len(discarded)})
+                rejected = max(rejected, len(discarded))
+                if self.marker_id in identities or len(identities) > len(best_ids):
+                    best_corners = [np.asarray(c, np.float32) / scale + np.asarray(offset, np.float32)
+                                    + (0.5 / scale - 0.5) for c in corners]
+                    best_ids, method = identities, name
+                if self.marker_id in identities:
+                    return True
+            return False
+
+        if scan(gray, "native"):
+            return best_corners, best_ids, method, rejected, attempts, details, budget_exhausted
+        hint = self._roi_hint
+        if (hint and image.shape[:2] == hint["shape"] and camera_source == hint["camera_source"]
+                and 0 <= received - hint["received"] <= ROI_HINT_SECONDS):
+            points = np.asarray(hint["corners"])
+            margin = max(24, 2 * float(np.ptp(points, axis=0).max()))
+            x0, y0 = np.maximum(0, np.floor(points.min(axis=0) - margin)).astype(int)
+            x1, y1 = np.minimum((gray.shape[1], gray.shape[0]), np.ceil(points.max(axis=0) + margin)).astype(int)
+            if x1 > x0 and y1 > y0:
+                # 이전 좌표는 검색 영역에만 사용한다. 현재 프레임에서 ID를 다시 읽어야 한다.
+                roi = cv2.resize(gray[y0:y1, x0:x1], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                # 실제 이동 누락 JPEG에서 대비 보정은 실패하고 원본 확대만 성공한 사례를 확인했다.
+                if scan(roi, "roi_2x", scale=2.0, offset=(x0, y0)):
+                    return best_corners, best_ids, method, rejected, attempts, details, budget_exhausted
+                if scan(self._contrast.apply(roi), "roi_contrast_2x", scale=2.0, offset=(x0, y0)):
+                    return best_corners, best_ids, method, rejected, attempts, details, budget_exhausted
+        if time.perf_counter() - started <= FALLBACK_BUDGET_SECONDS:
+            scan(self._contrast.apply(gray), "contrast")
+        else:
+            budget_exhausted = True
+        return best_corners, best_ids, method, rejected, attempts, details, budget_exhausted
 
     def observe(self, image, *, received_monotonic_s=None, client_captured_at=None, frame_id=None, camera_source=None):
         received = time.monotonic() if received_monotonic_s is None else received_monotonic_s
         start = time.perf_counter()
         with self._lock:
-            found_corners, found_ids = [], []
-            for detector in self.detectors:
-                corners, ids, _ = detector.detectMarkers(image)
-                ids = [] if ids is None else ids.flatten().tolist()
-                if self.marker_id in ids or len(ids) > len(found_ids):
-                    found_corners, found_ids = corners, ids
-                if self.marker_id in ids:
-                    break
+            context = (camera_source, image.shape[:2])
+            if context != self._source_context:
+                self._recent.clear()
+                self._roi_hint = None
+                self._source_context = deepcopy(context)
+            found_corners, found_ids, method, rejected, attempts, details, exhausted = self._detect(image, received, camera_source, start)
             markers = []
             for identity, corners in zip(found_ids, found_corners, strict=True):
                 points = corners.reshape(4, 2)
@@ -73,9 +132,15 @@ class ArucoTracker:
                                 "center_px": center, "heading_deg": heading})
             matches = [marker for marker in markers if marker["id"] == self.marker_id]
             status = "detected" if len(matches) == 1 else "ambiguous" if matches else "lost"
+            self._recent.append(status)
             self._latest = {
                 "tracking_status": status, "dictionary": self.dictionary, "rover_marker_id": self.marker_id,
                 "detection_status": status,
+                "detection_method": method, "rejected_candidate_count": rejected,
+                "detection_attempts": attempts,
+                "detection_attempt_details": details, "fallback_budget_exhausted": exhausted,
+                "recent_detection": {"frames": len(self._recent), "detected": self._recent.count("detected"),
+                                     "ratio": self._recent.count("detected") / len(self._recent)},
                 "width": image.shape[1], "height": image.shape[0], "markers": markers,
                 "rover": matches[0] if status == "detected" else None,
                 "coordinate_frame": "camera_image", "unit": "pixel", "origin": "top_left",
@@ -90,6 +155,11 @@ class ArucoTracker:
                 "camera_source": camera_source,
             }
             result = self.current()
+            if result["tracking_status"] == "detected":
+                self._roi_hint = {"corners": matches[0]["corners_px"], "received": received,
+                                  "shape": image.shape[:2], "camera_source": deepcopy(camera_source)}
+            elif status == "ambiguous":
+                self._roi_hint = None
             if self.output_path is not None:
                 self.output_path.parent.mkdir(parents=True, exist_ok=True)
                 pending = None

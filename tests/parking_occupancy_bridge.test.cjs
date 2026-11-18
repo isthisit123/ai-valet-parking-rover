@@ -166,6 +166,29 @@ test('matches marker history at inference capture time instead of the rover posi
     assert.equal(f.sent[0].rover_exclusion.frame_delta_ms, 0);
 });
 
+test('one missed marker frame can retain body identity only with decoded support on both sides', async () => {
+    const f = fixture(); f.aruco(); f.tick(100); f.aruco({tracking_status: 'lost', rover: null});
+    f.detector.vehicles = [roverBox(), otherCar()];
+    const request = f.detector.detect(); f.tick(200); f.aruco();
+    const result = await request; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(result.length, 1);
+    assert.equal(result[0].bbox.x, 180);
+    assert.equal(f.sent[0].rover_exclusion.association_method, 'bracketed_marker_observations');
+    assert.equal(f.sent[0].spaces[3].status, 'occupied');
+});
+
+test('ambiguous ID never uses bracketing and rapid motion is not extrapolated', async () => {
+    for (const ambiguous of [true, false]) {
+        const f = fixture(); f.aruco(); f.tick(100);
+        f.aruco({tracking_status: ambiguous ? 'ambiguous' : 'lost', rover: null});
+        f.detector.vehicles = [roverBox()]; const request = f.detector.detect(); f.tick(200);
+        f.aruco(ambiguous ? {} : {rover: {id: 7, center_px: [300, 160], corners_px: [[280, 140], [320, 140], [320, 180], [280, 180]]}});
+        const result = await request; await new Promise(resolve => setImmediate(resolve));
+        assert.equal(result.length, 1);
+        assert.equal(f.sent[0].rover_exclusion.excluded_count, 0);
+    }
+});
+
 for (const offset of [150, 151]) {
     test(`marker frame offset ${offset}ms respects the 150ms matching limit`, async () => {
         const f = fixture(); f.aruco(); f.tick(offset); f.detector.vehicles = [roverBox()];

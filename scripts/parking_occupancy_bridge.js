@@ -26,7 +26,7 @@
         markerHistory = markerHistory.filter(item => Date.now() - item.capturedMs <= MARKER_HISTORY_MS
             && item.id === data.rover_marker_id);
         markerHistory.push({capturedMs, source: {...data.camera_source}, id: data.rover_marker_id,
-            frameId: data.frame_id, valid, corners: valid ? corners.map(p => [...p]) : null,
+            frameId: data.frame_id, status: data.tracking_status, valid, corners: valid ? corners.map(p => [...p]) : null,
             center: valid ? [...center] : null});
         markerHistory = markerHistory.slice(-64);
     }
@@ -37,7 +37,12 @@
             && ['kind', 'session_id', 'width', 'height'].every(key => item.source[key] === captured[key])
             && Math.abs(item.capturedMs - time) <= MARKER_MATCH_MS);
         matches.sort((a, b) => Math.abs(a.capturedMs - time) - Math.abs(b.capturedMs - time));
-        const pose = matches[0];
+        let pose = matches[0], support = null;
+        if (pose?.status === 'lost') {
+            const before = matches.filter(p => p.valid && p.capturedMs < time).sort((a, b) => b.capturedMs - a.capturedMs)[0];
+            const after = matches.filter(p => p.valid && p.capturedMs > time).sort((a, b) => a.capturedMs - b.capturedMs)[0];
+            if (before && after && before.id === after.id) {pose = before; support = after;}
+        }
         if (!pose?.valid || captured.width <= 0 || captured.height <= 0) {
             return {detections, evidence: {status: 'no_matching_marker', excluded_count: 0}};
         }
@@ -47,15 +52,26 @@
         const markerArea = Math.abs(corners.reduce((area, p, i) => {
             const q = corners[(i + 1) % 4]; return area + p[0] * q[1] - q[0] * p[1];
         }, 0)) / 2;
+        const supportCorners = support?.corners.map(p => [p[0] * scale[0], p[1] * scale[1]]) || [];
+        const supportCenter = support?.center.map((v, i) => v * scale[i]);
+        if (supportCenter && Math.hypot(center[0] - supportCenter[0], center[1] - supportCenter[1]) > 0.5 * Math.sqrt(markerArea)) {
+            return {detections, evidence: {status: 'uncertain_motion', excluded_count: 0}};
+        }
+        const markerCorners = [...corners, ...supportCorners];
         const candidates = [];
         for (const [index, detection] of detections.entries()) {
             const b = detection.bbox;
             if (!b || ![b.x, b.y, b.width, b.height].every(Number.isFinite) || b.width <= 0 || b.height <= 0) continue;
             if (markerArea <= 1 || b.width * b.height > markerArea * MAX_ROVER_BOX_AREA_RATIO) continue;
-            if (!corners.every(p => p[0] >= b.x && p[0] <= b.x + b.width && p[1] >= b.y && p[1] <= b.y + b.height)) continue;
+            if (!markerCorners.every(p => p[0] >= b.x && p[0] <= b.x + b.width && p[1] >= b.y && p[1] <= b.y + b.height)) continue;
             const rx = (center[0] - b.x) / b.width, ry = (center[1] - b.y) / b.height;
             if (rx < MARKER_CENTER_MARGIN || rx > 1 - MARKER_CENTER_MARGIN
                 || ry < MARKER_CENTER_MARGIN || ry > 1 - MARKER_CENTER_MARGIN) continue;
+            if (supportCenter) {
+                const sx = (supportCenter[0] - b.x) / b.width, sy = (supportCenter[1] - b.y) / b.height;
+                if (sx < MARKER_CENTER_MARGIN || sx > 1 - MARKER_CENTER_MARGIN
+                    || sy < MARKER_CENTER_MARGIN || sy > 1 - MARKER_CENTER_MARGIN) continue;
+            }
             candidates.push(index);
         }
         if (candidates.length !== 1) return {detections,
@@ -63,6 +79,8 @@
         const ignored = candidates[0];
         return {detections: detections.filter((_, i) => i !== ignored), evidence: {
             status: 'matched', excluded_count: 1, rover_marker_id: pose.id, marker_frame_id: pose.frameId,
+            association_method: support ? 'bracketed_marker_observations' : 'direct_marker_observation',
+            support_marker_frame_id: support?.frameId || null,
             marker_captured_at: new Date(pose.capturedMs).toISOString(), frame_delta_ms: Math.abs(pose.capturedMs - time),
             marker_center_px: center, marker_corners_px: corners, image_size_px: [...size],
             bbox: {...detections[ignored].bbox}, confidence: detections[ignored].confidence}};

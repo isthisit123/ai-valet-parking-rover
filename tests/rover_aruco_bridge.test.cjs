@@ -31,7 +31,7 @@ function fixture({encoding = 8, request = 25, status = 'detected', switchCamera 
 test('native size JPEG tracking reports separate timings and preserves a fresh ID 7 pose', async () => {
     const f = fixture(); await f.bridge.loop();
     assert.equal(f.encodingTypes[0].mime, 'image/jpeg');
-    assert.equal(f.encodingTypes[0].quality, 0.85);
+    assert.equal(f.encodingTypes[0].quality, 0.92);
     assert.equal(f.bridge.canvas.width, 1280);
     assert.equal(f.bridge.canvas.height, 960);
     assert.equal(f.requests[0].options.headers['Content-Type'], 'image/jpeg');

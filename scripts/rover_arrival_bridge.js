@@ -131,14 +131,25 @@
                 status.textContent += `\n목적지 변경: ${parkingName(change.from)} → ${parkingName(change.to)} (빈칸 상태 변경)`;
             }
             if (active() && state.arrival_committed) status.textContent += '\n도착 영역 진입 · 현재 목표 고정';
-            if (state.distance_px != null && state.case_id === select.value) {
-                status.textContent += `\n목표까지 ${state.distance_px.toFixed(1)} px · 안정 유지 ${(state.held_seconds || 0).toFixed(1)} / ${state.hold_seconds}s`;
+            if (active() && state.hold_seconds != null) {
+                const distance = state.distance_px != null ? `${state.distance_px.toFixed(1)} px` : '현재 마커 관측 대기';
+                status.textContent += `\n목표까지 ${distance} · 안정 유지 ${(state.held_seconds || 0).toFixed(1)} / ${state.hold_seconds}s`;
+                if (state.tracking_paused) status.textContent += ' (일시정지)';
+            }
+            if (active() && state.hold_reset_count) {
+                const reasons = {tracking_gap_too_long:'마커 관측 공백 0.4초 초과',
+                    hold_pause_budget_exceeded:'관측 누락 누적 0.5초 초과',
+                    marker_identity_uncertain:'마커 ID 중복/불일치', position_unstable:'마커 위치 흔들림',
+                    outside_arrival_region:'도착 원 밖으로 이동', occupancy_blocked:'주차칸 점유/미확인',
+                    target_changed:'목표 변경', parking_route_changed:'점유 확인 후 경로 갱신'};
+                status.textContent += `\n도착 확인 재시작 ${state.hold_reset_count}회 · 마지막: ${reasons[state.last_hold_reset?.reason] || state.last_hold_reset?.reason || '상태 변경'}`;
             }
             if (state.reason) {
                 const reasons = {user_stopped:'사용자가 중단했습니다.', map_regeneration:'지도 재생성으로 중단했습니다.',
                     map_changed:'기준 지도가 갱신됐습니다.', camera_changed:'카메라 연결이 바뀌었습니다.',
                     camera_resolution_changed:'카메라 해상도가 바뀌었습니다.', tracking_stale:'200ms 동안 새 관측이 없습니다.',
-                    tracking_unavailable:'유효한 마커 관측이 없습니다.'};
+                    tracking_unavailable:'유효한 마커 관측이 없습니다.',
+                    tracking_gap_short:'마커가 잠시 누락됐습니다. 도착 확인 시간은 일시정지하며 최근 위치만 회색으로 표시합니다.'};
                 status.textContent += `\n${reasons[state.reason] || state.reason}`;
             }
         }
@@ -148,8 +159,8 @@
         const selected = active() ? state : selectedCase;
         if (!selected?.goal_px || state.status === 'blocked' || !available && !active()) return;
         if (!active() && spaceSelect.value && spaceSelect.value !== selected.parking_space_id) return;
-        if (active() && !state.guidance_available && state.status !== 'success') return;
-        const points = selected.waypoints || [];
+        const canGuide = !active() || state.guidance_available || state.status === 'success';
+        const points = canGuide ? selected.waypoints || [] : [];
         if (points.length) {
             ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 3; ctx.beginPath();
             points.forEach((point, index) => index ? ctx.lineTo(...point) : ctx.moveTo(...point)); ctx.stroke();
@@ -160,9 +171,10 @@
         ctx.strokeStyle = state.status === 'success' ? '#22c55e' : '#facc15'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(x,y,Math.max(0,Number(r)||0),0,2*Math.PI);
         ctx.fillStyle = 'rgba(250,204,21,0.16)'; ctx.fill(); ctx.stroke();
-        const point = state.case_id === select.value && state.current_position_px;
+        const current = state.case_id === select.value && state.current_position_px;
+        const point = current || (active() && state.tracking_paused && state.last_known_position_px);
         if (point) {
-            ctx.fillStyle = '#22d3ee';ctx.beginPath();ctx.arc(point[0],point[1],5,0,2*Math.PI);ctx.fill();
+            ctx.fillStyle = current ? '#22d3ee' : '#9ca3af';ctx.beginPath();ctx.arc(point[0],point[1],5,0,2*Math.PI);ctx.fill();
         }
     }
 

@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 import cv2
@@ -19,6 +20,93 @@ def marker_image(marker_id=7):
 
 
 class ArucoTrackerTest(unittest.TestCase):
+    def test_diagnostics_count_only_executed_passes_and_report_budget_exhaustion(self):
+        tracker = ArucoTracker()
+        with patch('src.rover_control.aruco_tracker.FALLBACK_BUDGET_SECONDS', -1):
+            state = tracker.observe(np.full((400, 400, 3), 255, np.uint8))
+        self.assertTrue(state['fallback_budget_exhausted'])
+        self.assertEqual(state['detection_attempts'], ['native'])
+        self.assertEqual(len(state['detection_attempt_details']), 2)
+        for detail in state['detection_attempt_details']:
+            self.assertEqual(detail['decoded_ids'], [])
+            self.assertGreaterEqual(detail['duration_ms'], 0)
+        self.assertIsNone(state['rover'])
+
+    def test_camera_session_or_resolution_change_resets_detection_history(self):
+        tracker = ArucoTracker()
+        tracker.observe(marker_image(), camera_source={'session_id': 'A'})
+        state = tracker.observe(marker_image(6), camera_source={'session_id': 'A'})
+        self.assertEqual(state['recent_detection']['frames'], 2)
+        state = tracker.observe(marker_image(6), camera_source={'session_id': 'B'})
+        self.assertEqual(state['recent_detection'], {'frames': 1, 'detected': 0, 'ratio': 0})
+        state = tracker.observe(cv2.resize(marker_image(), (800, 800)), camera_source={'session_id': 'B'})
+        self.assertEqual(state['recent_detection'], {'frames': 1, 'detected': 1, 'ratio': 1})
+
+    def test_roi_fallback_decodes_current_frame_and_maps_corners_to_native_pixels(self):
+        image = np.full((1000, 1000, 3), 255, np.uint8)
+        marker = marker_image()[100:200, 100:200]
+        image[700:740, 600:640] = cv2.resize(marker, (40, 40), interpolation=cv2.INTER_NEAREST)
+        source = {'session_id': 'A'}
+        tracker = ArucoTracker()
+        baseline = tracker.observe(image, camera_source=source)
+        self.assertEqual(baseline['tracking_status'], 'detected')
+        native = tracker.detectors[0]
+
+        class NativeMiss:
+            def detectMarkers(self, view):
+                if view.shape[:2] == (1000, 1000):
+                    return [], None, []
+                return native.detectMarkers(view)
+
+        tracker.detectors = [NativeMiss(), NativeMiss()]
+        recovered = tracker.observe(image, camera_source=source)
+        self.assertEqual(recovered['detection_method'], 'roi_2x')
+        np.testing.assert_allclose(recovered['rover']['center_px'], [619.5, 719.5], atol=0.8)
+        wrong = image.copy()
+        marker6 = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), 6, 40)
+        wrong[700:740, 600:640] = cv2.cvtColor(marker6, cv2.COLOR_GRAY2BGR)
+        self.assertIsNone(tracker.observe(wrong, camera_source=source)['rover'])
+        changed = tracker.observe(image, camera_source={'session_id': 'B'})
+        self.assertIsNone(changed['rover'])
+        self.assertNotIn('roi_2x', changed['detection_attempts'])
+        self.assertNotIn('roi_contrast_2x', changed['detection_attempts'])
+
+    def test_roi_contrast_remains_available_when_raw_enlargement_cannot_decode(self):
+        tracker = ArucoTracker()
+        tracker.observe(marker_image(), camera_source={'session_id': 'A'})
+        native = tracker.detectors[0]
+        calls = []
+
+        class ContrastOnly:
+            def detectMarkers(self, view):
+                calls.append(view.shape)
+                if len(calls) <= 4:  # native 2회와 원본 확대 ROI 2회 실패
+                    return [], None, []
+                return native.detectMarkers(view)
+
+        tracker.detectors = [ContrastOnly(), ContrastOnly()]
+        result = tracker.observe(marker_image(), camera_source={'session_id': 'A'})
+        self.assertEqual(result['detection_method'], 'roi_contrast_2x')
+        self.assertEqual(result['rover']['id'], 7)
+
+    def test_contrast_fallback_still_requires_a_real_decoded_id(self):
+        tracker = ArucoTracker()
+        native = tracker.detectors[0]
+        calls = []
+
+        class FirstPassMiss:
+            def detectMarkers(self, view):
+                calls.append(view.shape)
+                if len(calls) <= 2:
+                    return [], None, []
+                return native.detectMarkers(view)
+
+        tracker.detectors = [FirstPassMiss(), FirstPassMiss()]
+        recovered = tracker.observe(marker_image())
+        self.assertEqual(recovered['tracking_status'], 'detected')
+        self.assertEqual(recovered['detection_method'], 'contrast')
+        self.assertEqual(recovered['rover']['id'], 7)
+
     def test_delayed_or_future_capture_never_exposes_detected_marker_as_current_pose(self):
         image = marker_image()
         for seconds in (-3, 3):

@@ -1,4 +1,4 @@
-"""월드 보정 전, 같은 카메라 구도에서 수행하는 픽셀 도착 시험. 모터를 제어하지 않는다."""
+"""같은 카메라 구도의 픽셀 도착 시험. 저장된 실측값으로 높이 보정을 재사용한다."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -12,9 +12,9 @@ import time
 
 from src.map_processing.map_identity import require_map_identity
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES
+from .pose_sender import CapturePose, load_camera_position
 
-TRACKING_GAP_GRACE_SECONDS = 0.40
-HOLD_PAUSE_BUDGET_SECONDS = 0.50
+COMPARISON_MAX_AGE_SECONDS = 5.0
 
 
 class ArrivalTest:
@@ -29,6 +29,8 @@ class ArrivalTest:
         self.last_received = None
         self.last_pose_expires = None
         self.last_frame = None
+        self.last_capture = None
+        self.last_client_capture = None
         self.hold_start = None
         self.anchor = None
         self.samples = 0
@@ -37,8 +39,20 @@ class ArrivalTest:
         self.last_retarget = None
         self.hold_observed = 0.0
         self.hold_pause_total = 0.0
-        self.tracking_gap_seen = False
         self.last_known_position = None
+        self.position_converter = None
+        self.camera_settings_bytes = None
+
+    def _load_position_converter(self, folder):
+        path = folder / "world/camera_position.json"
+        if not path.is_file():
+            return None, None
+        settings_bytes = path.read_bytes()
+        settings = load_camera_position(folder)
+        converter = CapturePose(folder, marker_id=self.marker_id,
+                                camera_position_cm=settings["camera_position_cm"],
+                                marker_height_cm=settings["marker_height_cm"])
+        return converter, settings_bytes
 
     def catalog(self, *, live=True):
         try:
@@ -72,6 +86,8 @@ class ArrivalTest:
                                   "goal_px": goal, "preview": f"/captures/latest/routes/{case_id}.png"})
                 result = {"ready": True, "capture_id": report["capture_id"], **identity,
                           "image_size_px": size, "camera_source": source, "cases": cases}
+                converter, _ = self._load_position_converter(folder)
+                result["height_correction_applied"] = converter is not None
             # map_lock 밖에서 점유 잠금을 얻어 게시/점유 요청 간 잠금 역전을 피한다.
             if self.parking is not None and live:
                 result["occupancy"] = self.parking.current()
@@ -89,12 +105,12 @@ class ArrivalTest:
         except (OSError, ValueError, KeyError, TypeError, IndexError, ZeroDivisionError) as error:
             return {"ready": False, "error": str(error), "cases": []}
 
-    def start(self, case_id, *, capture_id, radius_px=15, hold_seconds=1.0,
+    def start(self, case_id, *, capture_id, radius_px=15, hold_seconds=2.0,
               parking_space_id=None, auto_retarget=True, arrival_area_ratio=0.5):
         if type(radius_px) not in (int, float) or not isfinite(radius_px) or not 3 <= radius_px <= 100:
             raise ValueError("도착 반경은 지도 기준 3~100px이어야 합니다.")
         if type(hold_seconds) not in (int, float) or not isfinite(hold_seconds) or not 0.5 <= hold_seconds <= 5:
-            raise ValueError("유지 시간은 0.5~5초여야 합니다.")
+            raise ValueError("위치 비교 간격은 0.5~5초여야 합니다.")
         if type(auto_retarget) is not bool:
             raise ValueError("자동 목적지 변경은 true/false여야 합니다.")
         with self.lock:
@@ -103,6 +119,8 @@ class ArrivalTest:
                 raise ValueError(catalog["error"])
             if catalog["capture_id"] != capture_id:
                 raise ValueError("지도가 갱신됐습니다. 테스트 목록을 다시 불러오세요.")
+            with self.map_lock:
+                converter, settings_bytes = self._load_position_converter(self.map_root / "latest")
             matches = [case for case in catalog["cases"] if case["case_id"] == case_id]
             if len(matches) != 1:
                 raise ValueError("생성된 5개 테스트케이스 중 하나를 선택하세요.")
@@ -120,9 +138,15 @@ class ArrivalTest:
                           "id_assignment_revision": catalog["id_assignment_revision"],
                           "image_size_px": catalog["image_size_px"], "camera_source": catalog["camera_source"],
                           "radius_px": radius_px, "hold_seconds": hold_seconds,
+                          "arrival_method": "two_observation_comparison",
+                          "comparison_max_age_seconds": max(COMPARISON_MAX_AGE_SECONDS, 2 * hold_seconds),
                           "stability_px": min(5.0, radius_px / 3), "current_position_px": None,
                           "distance_px": None, "held_seconds": 0, "sample_count": 0,
                           "started_at": datetime.now(timezone.utc).isoformat()}
+            self.position_converter, self.camera_settings_bytes = converter, settings_bytes
+            self.state["height_correction_applied"] = converter is not None
+            if converter is not None:
+                self.state["position_reference"] = "height_corrected_marker_with_offset"
             if self.parking is not None:
                 self.state.update(requested_parking_space_id=parking_space_id, auto_retarget=auto_retarget,
                                   arrival_area_ratio=arrival_area_ratio,
@@ -131,8 +155,9 @@ class ArrivalTest:
                                   replan_count=0, target_changes=[])
                 self.parking_signature = self.last_retarget = None
             self.last_received = self.last_frame = None
+            self.last_capture = None
+            self.last_client_capture = None
             self.last_pose_expires = None
-            self.tracking_gap_seen = False
             self.last_known_position = None
             self.state.update(tracking_paused=False, tracking_available=False, last_known_position_px=None)
             self._reset_hold()
@@ -156,25 +181,27 @@ class ArrivalTest:
         self.hold_start = self.anchor = None
         self.samples = 0
         self.hold_observed = self.hold_pause_total = 0.0
-        self.state.update(held_seconds=0, sample_count=0, hold_pause_seconds=0)
+        self.state.update(held_seconds=0, sample_count=0, hold_pause_seconds=0,
+                          comparison_anchor_px=None, comparison_displacement_px=None)
 
     def _tracking_missing(self, now, reason, *, allow_grace=True):
         age = now - self.last_received if self.last_received is not None else float("inf")
-        self.tracking_gap_seen = True
-        short = (allow_grace and 0 <= age <= TRACKING_GAP_GRACE_SECONDS + 1e-6 and
-                 (self.anchor is None or self.hold_pause_total + age <= HOLD_PAUSE_BUDGET_SECONDS + 1e-6))
+        limit = self.state.get("comparison_max_age_seconds", COMPARISON_MAX_AGE_SECONDS)
+        # 현재 위치의 만료는 비교 기준점의 유실과 구분한다. 새 유효 관측만 성공시킬 수 있다.
+        if not allow_grace:
+            self._reset_hold("marker_identity_uncertain")
+        elif self.hold_start is not None and now - self.hold_start > limit:
+            self._reset_hold("comparison_expired")
+        reference_available = allow_grace and 0 <= age <= limit
         self.state.update(current_position_px=None, distance_px=None, guidance_available=False,
-                          tracking_available=False, tracking_paused=short,
+                          tracking_available=False, tracking_paused=reference_available,
                           tracking_gap_ms=round(age * 1000, 1) if isfinite(age) else None,
-                          last_known_position_px=deepcopy(self.last_known_position) if short else None)
-        if short:
-            self.state["reason"] = "tracking_gap_short"
+                          last_known_position_px=deepcopy(self.last_known_position) if reference_available else None)
+        if self.anchor is not None:
+            self.state.update(status="holding", reason="comparison_waiting_for_observation")
         else:
-            reset_reason = ("marker_identity_uncertain" if not allow_grace else
-                            "tracking_gap_too_long" if age > TRACKING_GAP_GRACE_SECONDS + 1e-6 else
-                            "hold_pause_budget_exceeded")
-            self._reset_hold(reset_reason)
-            self.state.update(status="waiting_for_tracking", reason=reason)
+            self.state.update(status="waiting_for_tracking" if not reference_available else self.state["status"],
+                              reason=reason)
 
     def _save(self):
         if self.output_path is None:
@@ -203,6 +230,7 @@ class ArrivalTest:
     def _check_map(self):
         if "capture_id" not in self.state or self.state["status"] in ("idle", "stopped", "invalidated"):
             return
+        reason = "map_changed"
         with self.map_lock:
             try:
                 report = json.loads((self.map_root / "latest/report.json").read_text(encoding="utf-8"))
@@ -212,9 +240,20 @@ class ArrivalTest:
                              report["id_assignment_revision"] == self.state["id_assignment_revision"])
             except (OSError, ValueError, KeyError):
                 unchanged = False
+            if unchanged:
+                try:
+                    path = self.map_root / "latest/world/camera_position.json"
+                    settings_bytes = path.read_bytes() if path.is_file() else None
+                    if settings_bytes != self.camera_settings_bytes:
+                        raise ValueError("카메라 실측값이 변경됐습니다.")
+                    if self.position_converter is not None:
+                        self.position_converter.require_current()
+                except (OSError, ValueError, KeyError):
+                    unchanged = False
+                    reason = "position_correction_changed"
         if not unchanged:
-            self._reset_hold("map_changed")
-            self.state.update(status="invalidated", reason="map_changed", current_position_px=None, distance_px=None)
+            self._reset_hold(reason)
+            self.state.update(status="invalidated", reason=reason, current_position_px=None, distance_px=None)
             self.state.update(last_known_position_px=None, tracking_paused=False, tracking_available=False)
             self.state["guidance_available"] = False
             self._save()
@@ -305,12 +344,18 @@ class ArrivalTest:
                      and type(received) in (int, float) and isfinite(received) and 0 <= now - received <= 0.20)
             client_time = observation.get("client_captured_at")
             capture_remaining = 0.20
+            captured = received
+            client_capture = None
             if client_time:
                 try:
                     parsed = datetime.fromisoformat(client_time.replace("Z", "+00:00"))
+                    if parsed.utcoffset() is None:
+                        raise ValueError("촬영 시각에 시간대가 필요합니다.")
                     age = (datetime.now(timezone.utc) - parsed).total_seconds()
                     valid = valid and -0.05 <= age <= 0.20
                     capture_remaining = min(0.20, 0.20 - age)
+                    captured = now - age
+                    client_capture = parsed.timestamp()
                 except (ValueError, TypeError):
                     valid = False
             if not valid:
@@ -327,26 +372,37 @@ class ArrivalTest:
                 self._save()
                 return deepcopy(self.state)
             frame_key = observation.get("frame_id") or received
-            if frame_key == self.last_frame or (self.last_received is not None and received <= self.last_received):
+            if (frame_key == self.last_frame or (self.last_received is not None and received <= self.last_received)
+                    or (self.last_capture is not None and captured <= self.last_capture)
+                    or (client_capture is not None and self.last_client_capture is not None
+                        and client_capture <= self.last_client_capture)):
                 return deepcopy(self.state)
-            previous_received = self.last_received
-            had_gap = self.tracking_gap_seen or (previous_received is not None and received - previous_received > 0.20 + 1e-6)
-            gap = received - previous_received if previous_received is not None else 0
-            if had_gap and (gap > TRACKING_GAP_GRACE_SECONDS + 1e-6 or
-                            self.hold_pause_total + gap > HOLD_PAUSE_BUDGET_SECONDS + 1e-6):
-                self._reset_hold("tracking_gap_too_long" if gap > TRACKING_GAP_GRACE_SECONDS + 1e-6
-                                 else "hold_pause_budget_exceeded")
-            elif had_gap and self.anchor is not None:
-                self.hold_pause_total += gap
-            self.tracking_gap_seen = False
+            if self.position_converter is not None:
+                try:
+                    with self.map_lock:
+                        pose = self.position_converter.convert(observation, now=now)
+                        if pose is None:
+                            return deepcopy(self.state)
+                        position = self.position_converter.world_to_map([pose["x_cm"], pose["y_cm"]])
+                except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
+                    self._reset_hold("position_correction_failed")
+                    self._tracking_missing(now, "position_correction_failed", allow_grace=False)
+                    self.state["position_correction_error"] = str(error)
+                    self._save()
+                    return deepcopy(self.state)
+                self.state.pop("position_correction_error", None)
+            else:
+                x, y = rover["center_px"]
+                if not all(type(v) in (int, float) and isfinite(v) for v in (x, y)):
+                    raise ValueError("유한한 마커 중심 좌표가 필요합니다.")
+                position = [x * self.state["image_size_px"][0] / source["width"],
+                            y * self.state["image_size_px"][1] / source["height"]]
             self.last_frame, self.last_received = frame_key, received
+            self.last_capture = captured
+            if client_capture is not None:
+                self.last_client_capture = client_capture
             # GET에서도 촬영 후 200ms를 넘긴 좌표를 유지하지 않는다. 수신 시각으로 TTL을 새로 시작하지 않는다.
             self.last_pose_expires = min(received + 0.20, now + capture_remaining)
-            x, y = rover["center_px"]
-            if not all(type(v) in (int, float) and isfinite(v) for v in (x, y)):
-                raise ValueError("유한한 마커 중심 좌표가 필요합니다.")
-            position = [x * self.state["image_size_px"][0] / source["width"],
-                        y * self.state["image_size_px"][1] / source["height"]]
             self.last_known_position = list(position)
             self.state.update(tracking_available=True, tracking_paused=False, tracking_gap_ms=0,
                               last_known_position_px=list(position))
@@ -367,15 +423,18 @@ class ArrivalTest:
                 self._reset_hold("outside_arrival_region")
                 self.state["status"] = "running"
             else:
-                if self.anchor is None or dist(position, self.anchor) > self.state["stability_px"]:
+                if self.anchor is not None and captured - self.hold_start > self.state["comparison_max_age_seconds"]:
+                    self._reset_hold("comparison_expired")
+                if self.anchor is not None and dist(position, self.anchor) > self.state["stability_px"]:
                     self._reset_hold("position_unstable")
-                    self.anchor, self.hold_start = position, received
-                elif not had_gap and previous_received is not None:
-                    self.hold_observed += min(0.20, max(0.0, received - previous_received))
+                if self.anchor is None:
+                    self.anchor, self.hold_start = list(position), captured
+                self.hold_observed = max(0.0, captured - self.hold_start)
                 self.samples += 1
                 self.state.update(status="holding", held_seconds=self.hold_observed, sample_count=self.samples,
-                                  hold_pause_seconds=self.hold_pause_total)
-                if self.state["held_seconds"] >= self.state["hold_seconds"] and self.samples >= 5:
+                                  comparison_anchor_px=list(self.anchor),
+                                  comparison_displacement_px=dist(position, self.anchor))
+                if self.hold_observed + 1e-6 >= self.state["hold_seconds"] and self.samples >= 2:
                     self.state.update(status="success", completed_at=datetime.now(timezone.utc).isoformat())
             self._save()
             return deepcopy(self.state)

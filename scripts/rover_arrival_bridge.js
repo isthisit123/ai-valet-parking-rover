@@ -5,7 +5,7 @@
     const title = document.createElement('h2');
     title.textContent = '로버 도착 판정 테스트';
     const note = document.createElement('p');
-    note.textContent = '상단 「모드 선택 → 감시 모드」에서 차량 인식을 실행하세요. 로버 마커 중심이 주차칸 중앙의 노란 원 안에서 1초간 안정되면 도착입니다.';
+    note.textContent = '상단 「모드 선택 → 감시 모드」에서 차량 인식을 실행하세요. 노란 원 안의 첫 위치와 2초 뒤 새로 인식한 위치가 일치하면 도착입니다. 중간 미검출은 허용하며, 이동이 확인되면 다시 비교합니다. 카메라 좌표를 등록하면 마커 아래 바닥 위치를 사용합니다.';
     const select = document.createElement('select');
     select.style.cssText = 'color:white;background:#1f2937;padding:8px;width:28rem;max-width:100%;';
     const area = document.createElement('input');
@@ -111,10 +111,14 @@
         else if (!catalog.ready) status.textContent = catalog.error || '카메라를 켜고 지도를 한 번 생성하세요.';
         else {
             const labels = {idle:'케이스를 선택하고 테스트를 시작하세요.', running:'목표로 이동 중',
-                holding:'도착 영역 안에서 위치 안정성 확인 중', waiting_for_tracking:'현재 마커 관측 대기 중',
+                holding:'도착 영역 안에서 2초 전후 위치 비교 중', waiting_for_tracking:'현재 마커 관측 대기 중',
                 success:'성공 — 도착 판정 완료', stopped:'테스트 중단', invalidated:'지도/카메라 변경: 지도를 확인하고 다시 시작하세요.',
                 blocked:'빈칸 조건을 충족하지 않아 경로 안내 중단', unavailable:'요청을 완료하지 못했습니다.'};
             status.textContent = labels[state.status] || state.status;
+            const correction = active() ? state : catalog;
+            status.textContent += correction.height_correction_applied
+                ? '\n높이 보정 적용 · 파란 점과 도착 판정은 마커 아래 바닥 위치 기준입니다.'
+                : '\n높이 보정 미적용 · 카메라 실측 좌표를 등록하고 테스트를 다시 시작하세요.';
             const selected = active() ? state : selectedCase;
             if (selected?.parking_space_id && selected.goal_px) status.textContent += `\n목표 ${parkingName(selected.parking_space_id)} · (${selected.goal_px.map(v => Number(v).toFixed(1)).join(', ')}) px`;
             if (selected?.arrival_region) {
@@ -133,13 +137,14 @@
             if (active() && state.arrival_committed) status.textContent += '\n도착 영역 진입 · 현재 목표 고정';
             if (active() && state.hold_seconds != null) {
                 const distance = state.distance_px != null ? `${state.distance_px.toFixed(1)} px` : '현재 마커 관측 대기';
-                status.textContent += `\n목표까지 ${distance} · 안정 유지 ${(state.held_seconds || 0).toFixed(1)} / ${state.hold_seconds}s`;
-                if (state.tracking_paused) status.textContent += ' (일시정지)';
+                status.textContent += `\n목표까지 ${distance} · 위치 비교 간격 ${(state.held_seconds || 0).toFixed(1)} / ${state.hold_seconds}s`;
+                if (state.comparison_displacement_px != null) status.textContent += ` · 기준점 이동 ${state.comparison_displacement_px.toFixed(1)} / ${state.stability_px}px`;
+                if (state.tracking_paused) status.textContent += ' (새 마커 관측 대기)';
             }
             if (active() && state.hold_reset_count) {
-                const reasons = {tracking_gap_too_long:'마커 관측 공백 0.4초 초과',
-                    hold_pause_budget_exceeded:'관측 누락 누적 0.5초 초과',
+                const reasons = {comparison_expired:'비교 기준점의 유효 기간 초과',
                     marker_identity_uncertain:'마커 ID 중복/불일치', position_unstable:'마커 위치 흔들림',
+                    position_correction_failed:'높이 보정 위치 계산 실패',
                     outside_arrival_region:'도착 원 밖으로 이동', occupancy_blocked:'주차칸 점유/미확인',
                     target_changed:'목표 변경', parking_route_changed:'점유 확인 후 경로 갱신'};
                 status.textContent += `\n도착 확인 재시작 ${state.hold_reset_count}회 · 마지막: ${reasons[state.last_hold_reset?.reason] || state.last_hold_reset?.reason || '상태 변경'}`;
@@ -149,9 +154,12 @@
                     map_changed:'기준 지도가 갱신됐습니다.', camera_changed:'카메라 연결이 바뀌었습니다.',
                     camera_resolution_changed:'카메라 해상도가 바뀌었습니다.', tracking_stale:'200ms 동안 새 관측이 없습니다.',
                     tracking_unavailable:'유효한 마커 관측이 없습니다.',
-                    tracking_gap_short:'마커가 잠시 누락됐습니다. 도착 확인 시간은 일시정지하며 최근 위치만 회색으로 표시합니다.'};
+                    position_correction_changed:'지도 보정 또는 카메라 실측값이 바뀌었습니다. 테스트를 다시 시작하세요.',
+                    position_correction_failed:'보정된 위치를 계산할 수 없어 도착 확인을 중단했습니다.',
+                    comparison_waiting_for_observation:'비교 기준점을 보관하고 새 마커 관측을 기다립니다. 최근 위치는 회색 참고점이며 새 인식 없이는 성공하지 않습니다.'};
                 status.textContent += `\n${reasons[state.reason] || state.reason}`;
             }
+            if (state.position_correction_error) status.textContent += `\n${state.position_correction_error}`;
         }
         if (!image) return;
         ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -223,7 +231,7 @@
         busy = true;render();
         try {
             state = await request('/api/arrival-test/start', {case_id:select.value, capture_id:catalog.capture_id,
-                arrival_area_ratio:Number(area.value)/100, hold_seconds:1.0,
+                arrival_area_ratio:Number(area.value)/100, hold_seconds:2.0,
                 parking_space_id:spaceSelect.value || null, auto_retarget:auto.checked});
         } catch(error) {state = {status:'unavailable',reason:error.message};}
         finally {busy=false;render();}

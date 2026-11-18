@@ -621,7 +621,7 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                         raise ValueError("테스트 설정은 JSON 객체여야 합니다.")
                     self.send_json(200, arrival.start(options.get("case_id"), capture_id=options.get("capture_id"),
                                                       radius_px=options.get("radius_px", 15),
-                                                      hold_seconds=options.get("hold_seconds", 1.0),
+                                                      hold_seconds=options.get("hold_seconds", 2.0),
                                                       parking_space_id=options.get("parking_space_id"),
                                                       auto_retarget=options.get("auto_retarget", True),
                                                       arrival_area_ratio=options.get("arrival_area_ratio", 0.5)))

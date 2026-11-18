@@ -295,7 +295,7 @@ class LiveParkingTest(unittest.TestCase):
             self.clock += 0.1
             state = self.arrival.observe(self.pose(x=320, y=200))
             self.assertEqual(state['status'], 'running')
-        for _ in range(12):
+        for _ in range(22):
             self.clock += 0.1
             state = self.arrival.observe(self.pose(x=320, y=230))
         self.assertEqual(state['status'], 'success')
@@ -323,7 +323,7 @@ class LiveParkingTest(unittest.TestCase):
         self.assertEqual(live['rover_exclusion']['rover_marker_id'], 7)
         self.assertEqual(live['states']['space_5'], 'occupied')
         self.start()
-        for _ in range(12):
+        for _ in range(22):
             self.clock += 0.1
             state = self.arrival.observe(self.pose(x=320, y=230))
         self.assertEqual(state['parking_space_id'], 'space_4')

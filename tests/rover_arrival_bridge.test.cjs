@@ -67,6 +67,7 @@ test('automatic selection submits the condition and retarget flag', async () => 
     assert.equal(request.data.parking_space_id, null);
     assert.equal(request.data.auto_retarget, true);
     assert.equal(request.data.arrival_area_ratio, 0.5);
+    assert.equal(request.data.hold_seconds, 2);
     assert.equal(request.data.radius_px, undefined);
 });
 
@@ -148,16 +149,37 @@ test('arrival commitment and own-rover exclusion are shown without changing the 
     assert.ok(f.elements.some(e => e.tag === 'p' && /ArUco로 로버 본체 제외/.test(e.textContent || '')));
 });
 
-test('brief loss retains progress and draws only a gray reference point without route guidance', async () => {
+test('missing observations retain comparison anchor and draw only a gray reference point without guidance', async () => {
     const f = await fixture();
     f.setState({status: 'holding', case_id: '03_exit', parking_space_id: 'space_4', goal_px: [320, 230],
-        radius_px: 20, guidance_available: false, tracking_paused: true, reason: 'tracking_gap_short',
-        current_position_px: null, last_known_position_px: [321, 230], held_seconds: 0.4, hold_seconds: 1,
+        radius_px: 20, guidance_available: false, tracking_paused: true, reason: 'comparison_waiting_for_observation',
+        current_position_px: null, last_known_position_px: [321, 230], held_seconds: 0.4, hold_seconds: 2,
         waypoints: [[180, 150], [320, 230]], occupancy: {fresh: true, states: {space_4: 'free'}}});
     await f.timers.shift()();
-    assert.match(f.status.textContent, /안정 유지 0.4 \/ 1s/);
-    assert.match(f.status.textContent, /일시정지/);
+    assert.match(f.status.textContent, /위치 비교 간격 0.4 \/ 2s/);
+    assert.match(f.status.textContent, /새 마커 관측 대기/);
+    assert.match(f.status.textContent, /새 인식 없이는 성공하지 않습니다/);
     assert.equal(f.contexts[0].fillStyle, '#9ca3af');
     assert.equal(f.contexts[0].segments, 0);
     assert.equal(f.drawing.at(-1)[0], 321);
+});
+
+test('height correction label and blue point use the corrected server position', async () => {
+    const f = await fixture();
+    f.setState({status: 'holding', case_id: '03_exit', parking_space_id: 'space_5', goal_px: [260, 200],
+        radius_px: 20, guidance_available: true, height_correction_applied: true,
+        current_position_px: [261, 202]});
+    await f.timers.shift()();
+    assert.match(f.status.textContent, /높이 보정 적용/);
+    assert.match(f.status.textContent, /마커 아래 바닥 위치/);
+    assert.deepEqual(f.drawing.at(-1), [261, 202, 5, 0, 2 * Math.PI]);
+    assert.equal(f.contexts[0].fillStyle, '#22d3ee');
+});
+
+test('uncorrected position and changed calibration are explicitly explained', async () => {
+    const f = await fixture();
+    assert.match(f.status.textContent, /높이 보정 미적용/);
+    f.setState({status: 'invalidated', case_id: '03_exit', reason: 'position_correction_changed'});
+    await f.timers.shift()();
+    assert.match(f.status.textContent, /카메라 실측값이 바뀌었습니다/);
 });

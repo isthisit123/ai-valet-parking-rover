@@ -94,10 +94,24 @@ class CapturePose:
             self.calibration_path, map_id=self.identity["map_id"], image_size=self.image_size.tolist(),
             image_sha256=self.identity["map_image_sha256"],
         )
+        self.world_to_image = inverse
         # 최초 보정식을 보관하고, 원본 웹캠과 지도 PNG의 크기 차이만 반영한다.
         self.matrix = np.linalg.inv(inverse) @ np.diag([*(self.image_size / self.native_size), 1.0])
         self.last_capture = -1.0
         self.last_frame = None
+
+    def world_to_map(self, position_cm):
+        """높이 보정된 월드 위치를 기준 지도 PNG의 픽셀로 되돌린다."""
+        point = np.asarray([number(value) for value in position_cm])
+        if point.shape != (2,):
+            raise ValueError("월드 위치 [x, y] cm가 필요합니다.")
+        denominator = self.world_to_image[2, :2] @ point + self.world_to_image[2, 2]
+        if abs(denominator) < 1e-9:
+            raise ValueError("보정된 위치를 지도 픽셀로 투영할 수 없습니다.")
+        result = project_points([point], self.world_to_image)[0]
+        if not np.isfinite(result).all():
+            raise ValueError("보정된 지도 픽셀 위치가 유효하지 않습니다.")
+        return result.tolist()
 
     def require_current(self):
         if ((self.folder / "report.json").read_bytes() != self.report_bytes

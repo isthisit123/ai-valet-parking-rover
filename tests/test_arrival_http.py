@@ -63,9 +63,10 @@ class ArrivalHttpTest(unittest.TestCase):
         try:
             catalog = get("/api/arrival-tests")
             self.assertTrue(catalog["ready"])
+            self.assertTrue(catalog["height_correction_applied"])
             self.assertEqual(len(catalog["cases"]), 5)
             case = catalog["cases"][2]["case_id"]
-            options = json.dumps({"case_id": case, "capture_id": report["capture_id"], "hold_seconds": 0.5}).encode()
+            options = json.dumps({"case_id": case, "capture_id": report["capture_id"]}).encode()
             with self.assertRaises(HTTPError) as unavailable:
                 urlopen(Request(url + '/api/arrival-test/start', options, {'Content-Type': 'application/json'}))
             self.assertEqual(unavailable.exception.code, 400)
@@ -96,6 +97,9 @@ class ArrivalHttpTest(unittest.TestCase):
             with urlopen(Request(url + "/api/arrival-test/start", options, {"Content-Type": "application/json"})) as response:
                 started = json.load(response)
                 self.assertEqual(started["status"], "waiting_for_tracking")
+                self.assertTrue(started["height_correction_applied"])
+                self.assertEqual(started["hold_seconds"], 2)
+                self.assertEqual(started["arrival_method"], "two_observation_comparison")
                 self.assertEqual(started['parking_space_id'], 'space_5')
                 self.assertEqual(started['goal_px'], [260, 230])
                 self.assertEqual(started['road_goal_px'], [260, 200])
@@ -112,9 +116,10 @@ class ArrivalHttpTest(unittest.TestCase):
             self.assertEqual(changed['parking_space_id'], 'space_4')
             self.assertEqual(changed['target_changes'][-1]['from'], 'space_5')
             image = np.full((400, 400, 3), 255, np.uint8)
-            image[180:280, 270:370] = marker_image()[100:200, 100:200]
+            # 상단 마커의 영상 중심은 목표 밖, 보정된 바닥 위치는 P4 중앙이 되도록 배치한다.
+            image[141:241, 283:383] = marker_image()[100:200, 100:200]
             _, encoded = cv2.imencode(".png", image)
-            for index in range(16):
+            for index in range(32):
                 headers = {"Content-Type": "image/png", "X-Camera-Session": "camera-A", "X-Source-Type": "webcam",
                            "X-Source-Width": "400", "X-Source-Height": "400", "X-Frame-Id": str(index)}
                 with urlopen(Request(url + "/api/aruco", encoded.tobytes(), headers)) as response:
@@ -124,8 +129,10 @@ class ArrivalHttpTest(unittest.TestCase):
                 self.assertEqual(pose["unit"], "cm")
                 self.assertEqual(pose["map_id"], report["map_id"])
                 # 합성 마커 중심의 바닥 투영과 렌즈에서 높이 평면으로 향하는 교점을 별도로 계산한다.
-                expected = np.array([50, 120]) + (1 - 10.5 / 110) * (np.array([319.5 / 4, 229.5 / 5]) - [50, 120])
+                expected = np.array([50, 120]) + (1 - 10.5 / 110) * (np.array([332.5 / 4, 190.5 / 5]) - [50, 120])
                 np.testing.assert_allclose([pose["x_cm"], pose["y_cm"]], expected, atol=0.15)
+                np.testing.assert_allclose(result["current_position_px"], [pose["x_cm"] * 4, pose["y_cm"] * 5], atol=.001)
+                self.assertGreater(np.linalg.norm(np.array([332.5, 190.5]) - result["goal_px"]), result["radius_px"])
                 self.assertLess(abs((pose["heading_deg"] + 180) % 360 - 180), 1)
                 if result["status"] == "success":
                     break

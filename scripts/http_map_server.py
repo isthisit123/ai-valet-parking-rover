@@ -26,8 +26,10 @@ from src.map_processing.map_config import BASE_DIR, DEFAULT_MAP, MapConfig, vali
 from src.map_processing.semantic_mapper import detect_regions, map_semantics, mask_paper_background
 from src.map_processing.path_visualizer import export_routes
 from scripts.generate_map import default_ocr_python, generate_map as generate_ocr_map
+from scripts.parking_regions import export_parking_regions
 from src.rover_control.aruco_tracker import ArucoTracker
 from src.rover_control.arrival_test import ArrivalTest
+from src.rover_control.live_parking import LiveParking
 from src.rover_control.map_preview import capture_floor_points, export_cm_routes, read_json, verify_junction
 
 
@@ -36,6 +38,10 @@ MAX_IMAGE_PIXELS = 8_000_000
 BRIDGE_PATH = Path(__file__).with_name("http_map_bridge.js")
 ARUCO_BRIDGE_PATH = Path(__file__).with_name("rover_aruco_bridge.js")
 ARRIVAL_BRIDGE_PATH = Path(__file__).with_name("rover_arrival_bridge.js")
+OCCUPANCY_BRIDGE_PATH = Path(__file__).with_name("parking_occupancy_bridge.js")
+DETECTION_WORKER_PATH = Path(__file__).with_name("parking_detection_worker.js")
+DETECTOR_PROXY_PATH = Path(__file__).with_name("parking_detector_proxy.js")
+PARKING_REGIONS_BRIDGE_PATH = Path(__file__).with_name("parking_regions_bridge.js")
 PUBLISH_LOCK = threading.RLock()
 
 
@@ -52,6 +58,46 @@ def decode_png(body):
     image = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None or image.shape[:2] != (height, width):
         raise ValueError("PNG 디코딩에 실패했습니다.")
+    return image
+
+
+def decode_tracking_image(body, content_type):
+    if content_type == "image/png":
+        return decode_png(body)
+    if content_type != "image/jpeg" or not body.startswith(b"\xff\xd8"):
+        raise ValueError("마커 프레임은 image/jpeg 또는 image/png여야 합니다.")
+    # 디코딩 전에 SOF의 해상도를 검사해 큰 JPEG도 PNG와 같은 제한을 적용한다.
+    offset, size = 2, None
+    while offset < len(body):
+        if body[offset] != 0xFF:
+            raise ValueError("JPEG 헤더가 올바르지 않습니다.")
+        while offset < len(body) and body[offset] == 0xFF:
+            offset += 1
+        if offset >= len(body):
+            break
+        marker = body[offset]
+        offset += 1
+        if marker in (0xD9, 0xDA):
+            break
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+            continue
+        if offset + 2 > len(body):
+            break
+        length = int.from_bytes(body[offset:offset + 2], "big")
+        if length < 2 or offset + length > len(body):
+            raise ValueError("JPEG 세그먼트 길이가 올바르지 않습니다.")
+        if marker in (0xC0, 0xC1, 0xC2):
+            if length < 8:
+                break
+            height, width = struct.unpack(">HH", body[offset + 3:offset + 7])
+            size = (height, width)
+            break
+        offset += length
+    if size is None or min(size) < 1 or size[0] * size[1] > MAX_IMAGE_PIXELS:
+        raise ValueError("JPEG 해상도가 허용 범위를 벗어났습니다.")
+    image = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.shape[:2] != size:
+        raise ValueError("JPEG 디코딩에 실패했습니다.")
     return image
 
 
@@ -260,6 +306,12 @@ def _generate_map_attempt(body, output_root, *, labels_path=DEFAULT_MAP.label_pa
         report["error"] = str(exc)
     if report["status"] == "map_generated":
         try:
+            report["parking_regions"] = export_parking_regions(semantic, report)
+            write_json(folder / "parking_regions.json", report["parking_regions"])
+            report["files"]["parking_regions"] = url("parking_regions.json")
+        except (ValueError, KeyError, TypeError, OSError, cv2.error) as exc:
+            report["parking_regions"] = {"status": "failed", "error": str(exc)}
+        try:
             report["route_generation"] = export_capture_routes(config, capture_id)
         except (ValueError, OSError, KeyError, TypeError, nx.NetworkXException, cv2.error) as exc:
             # 의미 지도 생성 성공과 경로 검증 실패를 구분해 알려준다.
@@ -351,12 +403,15 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 ocr_python=None, min_score=0.75, legacy_hints=False, preparation_path=None,
                 marker_layout=None, max_error_cm=1.0,
                 map_id=DEFAULT_MAP.map_id, rover_marker_id=7, aruco_dictionary="DICT_4X4_50",
-                aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None):
+                aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None,
+                occupancy_output_path=None):
     tracker = ArucoTracker(marker_id=rover_marker_id, dictionary=aruco_dictionary,
                            front_offset_deg=marker_front_offset_deg,
                            output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json")
     aruco_busy = threading.Lock()
-    arrival = ArrivalTest(output_root, marker_id=rover_marker_id, map_lock=PUBLISH_LOCK,
+    parking = LiveParking(output_root, map_lock=PUBLISH_LOCK,
+                          output_path=occupancy_output_path or BASE_DIR / "data/rover_runs/occupancy/latest.json")
+    arrival = ArrivalTest(output_root, marker_id=rover_marker_id, map_lock=PUBLISH_LOCK, parking=parking,
                            output_path=arrival_output_path)
     base = SimpleHTTPRequestHandler
     if aruco_helper is not None and aruco_helper.is_file():
@@ -394,11 +449,23 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
             path = unquote(urlsplit(self.path).path)
             if path in ("/", "/index.html"):
                 html = (web_root / "index.html").read_text(encoding="utf-8")
-                html = html.replace("</body>", '<script src="/rover-map-bridge.js"></script>'
+                html = html.replace("</body>", '<script src="/parking-regions-bridge.js"></script>'
+                                    '<script src="/rover-map-bridge.js"></script>'
+                                    '<script src="/parking-occupancy-bridge.js"></script>'
                                     '<script src="/rover-arrival-bridge.js"></script></body>')
                 self.send_bytes(200, html.encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/rover-map-bridge.js":
                 self.send_bytes(200, BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/parking-regions-bridge.js":
+                self.send_bytes(200, PARKING_REGIONS_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/parking-occupancy-bridge.js":
+                self.send_bytes(200, OCCUPANCY_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/parking-detection-worker.js":
+                self.send_bytes(200, DETECTION_WORKER_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/js/YOLODetector.js":
+                self.send_bytes(200, DETECTOR_PROXY_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/rover-original-yolo.js":
+                self.send_bytes(200, (web_root / "js/YOLODetector.js").read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/js/ArUcoBridge.js":
                 self.send_bytes(200, ARUCO_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/rover-arrival-bridge.js":
@@ -407,6 +474,11 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 self.send_json(200, arrival.catalog())
             elif path == "/api/arrival-test":
                 self.send_json(200, arrival.current())
+            elif path == "/api/parking-occupancy":
+                try:
+                    self.send_json(200, parking.current())
+                except (ValueError, OSError, KeyError) as error:
+                    self.send_json(400, {"error": str(error)})
             elif path == "/api/aruco-config":
                 self.send_json(200, {"marker_id": rover_marker_id, "dictionary": aruco_dictionary,
                                      "period_ms": aruco_period_ms, "front_offset_deg": marker_front_offset_deg})
@@ -426,6 +498,20 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
 
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path == "/api/parking-occupancy":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if self.headers.get_content_type() != "application/json" or not 0 < length <= 16384:
+                        raise ValueError("점유 정보는 16KiB 이내 application/json이어야 합니다.")
+                    self.connection.settimeout(2)
+                    data = json.loads(self.rfile.read(length))
+                    if not isinstance(data, dict):
+                        raise ValueError("점유 정보는 JSON 객체여야 합니다.")
+                    live = parking.update(data)
+                    self.send_json(200, {"occupancy": live, "arrival_test": arrival.current()})
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    self.send_json(400, {"error": str(error)})
+                return
             if path in ("/api/arrival-test/start", "/api/arrival-test/stop"):
                 try:
                     if path.endswith("/stop"):
@@ -449,7 +535,10 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                         raise ValueError("테스트 설정은 JSON 객체여야 합니다.")
                     self.send_json(200, arrival.start(options.get("case_id"), capture_id=options.get("capture_id"),
                                                       radius_px=options.get("radius_px", 15),
-                                                      hold_seconds=options.get("hold_seconds", 1.0)))
+                                                      hold_seconds=options.get("hold_seconds", 1.0),
+                                                      parking_space_id=options.get("parking_space_id"),
+                                                      auto_retarget=options.get("auto_retarget", True),
+                                                      arrival_area_ratio=options.get("arrival_area_ratio", 0.5)))
                 except (ValueError, OSError) as error:
                     self.send_json(400, {"error": str(error)})
                 return
@@ -458,17 +547,18 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                     self.send_json(409, {"error": "이전 마커 프레임 처리 중입니다."})
                     return
                 try:
-                    if self.headers.get_content_type() != "image/png":
-                        raise ValueError("마커 프레임은 image/png여야 합니다.")
+                    content_type = self.headers.get_content_type()
+                    if content_type not in ("image/png", "image/jpeg"):
+                        raise ValueError("마커 프레임은 image/jpeg 또는 image/png여야 합니다.")
                     length = int(self.headers.get("Content-Length", "0"))
                     if not 0 < length <= MAX_UPLOAD_BYTES:
-                        raise ValueError("마커 PNG 크기는 1~12MiB 범위여야 합니다.")
+                        raise ValueError("마커 프레임 크기는 1~12MiB 범위여야 합니다.")
                     self.connection.settimeout(2)
                     body = self.rfile.read(length)
                     if len(body) != length:
                         raise ValueError("마커 프레임 수신이 완료되지 않았습니다.")
                     received = time.monotonic()
-                    result = tracker.observe(decode_png(body), received_monotonic_s=received,
+                    result = tracker.observe(decode_tracking_image(body, content_type), received_monotonic_s=received,
                                              client_captured_at=self.headers.get("X-Captured-At"),
                                              frame_id=self.headers.get("X-Frame-Id"), camera_source=self.camera_source())
                     result["arrival_test"] = arrival.observe(result)

@@ -28,6 +28,7 @@
             }
             // PNG 인코딩 중 라이브 캔버스가 바뀌지 않도록 한 프레임을 복사한다.
             const frame = document.createElement('canvas');
+            const captured = window.RoverParkingRegions.snapshot();
             frame.width = source.width;
             frame.height = source.height;
             frame.getContext('2d').drawImage(source, 0, 0);
@@ -38,16 +39,24 @@
             status.textContent = `${frame.width}×${frame.height} PNG 전송 · OCR · 지도 및 경로 생성 중…`;
             const response = await fetch('/api/map-capture', {
                 method: 'POST', headers: {'Content-Type': 'image/png', 'X-Captured-At': capturedAt,
-                    'X-Camera-Session': window.parkingApp?.mediaHandler?.videoElement?.srcObject?.getVideoTracks?.()[0]?.id || '',
-                    'X-Source-Type': window.parkingApp?.mediaHandler?.currentSourceType || '',
-                    'X-Source-Width': String(window.parkingApp?.mediaHandler?.videoElement?.videoWidth || 0),
-                    'X-Source-Height': String(window.parkingApp?.mediaHandler?.videoElement?.videoHeight || 0)}, body: blob,
+                    'X-Camera-Session': captured.session_id,
+                    'X-Source-Type': captured.kind,
+                    'X-Source-Width': String(captured.width),
+                    'X-Source-Height': String(captured.height)}, body: blob,
             });
             const result = await response.json();
             window.dispatchEvent(new CustomEvent('rover-map-result', {detail: result}));
             status.textContent = response.ok
                 ? `맵 생성 완료 (${result.generation_method === 'ocr' ? '새 사진 OCR' : '기존 힌트'})\n노드 ${result.graph.nodes}, 간선 ${result.graph.edges}, 연결 ${result.graph.connected}\n일반석 ${result.detected.normal}, 장애인석 ${result.detected.accessible}\n저장 위치: ${result.output_directory}`
                 : `맵 생성 실패: ${result.error}\n${result.output_directory || ''}\n받은 PNG와 OCR 미리보기를 확인하세요.`;
+            if (response.ok && result.published_as_latest) {
+                try {
+                    const count = window.RoverParkingRegions.apply(result, captured);
+                    status.textContent += `\nP1~P6 ${count}개 구역 자동 적용·저장 완료. 설정 모드에서 꼭짓점을 확인하세요. 점유는 미확인입니다.`;
+                } catch (error) {
+                    status.textContent += `\n자동 구역 적용 실패 (기존 설정 유지): ${error.message}`;
+                }
+            }
             const unresolved = (result.ocr?.labels || []).filter(item => item.status !== 'recognized');
             if (unresolved.length) {
                 status.textContent += '\n이름표 확인 필요: ' + unresolved.map(item => `${item.id} (${item.status})`).join(', ');
@@ -66,7 +75,7 @@
             const labels = {source: '받은 PNG', map: '처리된 지도', labels: 'OCR 힌트 JSON',
                 ocr_report: 'OCR 보고서', ocr_preview: 'OCR 미리보기',
                 preview: '그래프 미리보기', graph: '그래프 JSON', semantic: '의미 지도 JSON',
-                calibration: '보정 보고서', floor_points: '자동 기준점 JSON'};
+                calibration: '보정 보고서', floor_points: '자동 기준점 JSON', parking_regions: '주차칸 꼭짓점 JSON'};
             for (const [key, url] of Object.entries({...result.files, ...world?.files})) {
                 const link = document.createElement('a');
                 link.href = url;

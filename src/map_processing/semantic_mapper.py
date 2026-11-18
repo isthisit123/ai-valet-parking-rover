@@ -36,8 +36,23 @@ from .planar_calibration import load_world_to_image, project_points
 from .map_identity import require_map_identity
 
 
+def component_polygon(component, offset):
+    # 글자 구멍은 제외하고 색상 영역의 외곽을 둘레 순서로 단순화한다.
+    contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull = cv2.convexHull(max(contours, key=cv2.contourArea))
+    perimeter = cv2.arcLength(hull, True)
+    polygon = cv2.approxPolyDP(hull, 0.01 * perimeter, True)
+    for ratio in (0.01, 0.015, 0.02, 0.03, 0.04):
+        candidate = cv2.approxPolyDP(hull, ratio * perimeter, True)
+        if len(candidate) == 4 and cv2.contourArea(candidate) >= 0.93 * cv2.contourArea(hull):
+            polygon = candidate
+            break
+    points = polygon.reshape(-1, 2) + np.asarray(offset)
+    return points.astype(int).tolist()
+
+
 def extract_regions(mask, min_area, image_shape, *, allow_border=False,
-                    min_fill_ratio=REGION_MIN_FILL_RATIO):
+                    min_fill_ratio=REGION_MIN_FILL_RATIO, include_polygon=False):
     # 같은 색상으로 연결된 영역을 각각 검출
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask, connectivity=8
@@ -79,6 +94,9 @@ def extract_regions(mask, min_area, image_shape, *, allow_border=False,
             "center": [round(float(cx), 2), round(float(cy), 2)],
             "area": int(area)
         })
+        if include_polygon:
+            component = (labels[y:y + h, x:x + w] == i).astype(np.uint8) * 255
+            regions[-1]["polygon_px"] = component_polygon(component, (x, y))
 
     return regions
 
@@ -125,7 +143,7 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False, low_
         (GATE_REGION, False, 1.0),
     )
     regions = []
-    for threshold, is_real_dark, scale in region_settings:
+    for index, (threshold, is_real_dark, scale) in enumerate(region_settings):
         lower, upper, min_area = threshold
         if is_real_dark:
             # 얇게 이어진 그림자를 끊고, 경계에 닿은 시설도 힌트 매칭 후보로 남긴다.
@@ -133,7 +151,8 @@ def detect_regions(image, *, map_id=DEFAULT_MAP.map_id, real_profile=False, low_
             continue
         mask = cv2.inRange(hsv, lower, upper)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        regions.append(extract_regions(mask, math.ceil(min_area * scale), image.shape))
+        regions.append(extract_regions(mask, math.ceil(min_area * scale), image.shape,
+                                       include_polygon=index < 2))
     return tuple(regions)
 
 
@@ -246,9 +265,16 @@ def recover_dark_regions(image, regions, label_specs):
         return recovered
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    retries = ({"opening": (11, 11)}, *(
-        {"closing": (13, 13), "value_limit": limit} for limit in REAL_DARK_RETRY_VALUE_LIMITS
-    ))
+    retries = (
+        {"opening": (11, 11)},
+        *({"closing": (13, 13), "value_limit": limit} for limit in REAL_DARK_RETRY_VALUE_LIMITS),
+        # 기존 재검출에도 남은 시설만 큰 글자 구멍을 더 넓게 메워 재시도한다.
+        *(
+            {"closing": closing, "value_limit": limit}
+            for closing in ((17, 17), (21, 21))
+            for limit in REAL_DARK_RETRY_VALUE_LIMITS
+        ),
+    )
     for settings in retries:
         # 이음새를 끊거나 밝은 글자로 갈라진 어두운 영역을 메운다.
         candidates = [region for region in extract_dark_regions(hsv, **settings) if hint_count(region) == 1]

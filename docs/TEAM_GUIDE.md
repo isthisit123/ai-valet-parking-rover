@@ -21,6 +21,42 @@
 
 ## 카메라 점유 설정
 
+### HTTP 지도에서 웹 구역 자동 등록
+
+기본 OCR 지도 생성은 `semantic.json`의 주차칸에 `polygon_px: [[x,y], ...]`를 추가합니다. 기존 `bbox`, `center`, `area`, 시설·칸 ID와 도로 연결 계약은 유지합니다. 글자 내부 구멍을 제외한 색상 영역의 볼록 외곽을 단순화하며, 네 점 근사가 외곽 면적의 93% 이상을 보존할 때 사각형을 사용합니다. 그 외에는 외곽의 추가 꼭짓점을 유지합니다. cm 지도에서는 같은 점을 변환한 `polygon_cm`을 사용하고 `polygon_px`를 섞지 않습니다.
+
+`POST /api/map-capture`의 추가 응답 `parking_regions`와 고정 `parking_regions.json`은 `schema_version: "1.0"`, `capture_id`, 지도 식별자 3개, `source_sha256`, `camera_source`, `image_size_px`, `coordinate_frame: "capture_image"`, `unit: "pixel"`, 왼쪽 위 원점·오른쪽/아래 축, `regions`를 포함합니다. 구역은 `{id:"P1", parking_space_id:"space_1", type:"normal", points:[{x,y},...], occupied:null, occupancy_status:"unknown"}` 형식입니다. 외곽 내보내기 실패는 `parking_regions.status: "failed"`로 구분하고 지도·경로 결과는 보존합니다. 구버전 JSON 소비자는 새 필드를 무시할 수 있습니다.
+
+수신 웹은 정상 게시된 동일 응답 안의 여섯 칸과 식별자를 검증한 뒤 현재 캔버스 픽셀로 크기를 맞춥니다. `PARKING_SYSTEM_CONFIG`의 현재 소스 키에만 저장하며 다른 소스 설정은 유지합니다. 촬영 시점과 적용 시점의 소스·카메라 세션·원본 크기·종횡비가 달라지면 적용을 중단합니다. 웹 설정에는 지도 식별자와 `image_size_px`, `coordinate_frame: "parking_heaven_canvas"`를 함께 저장합니다. 고정 URL의 과거 결과를 다시 읽어 자동 적용하지 않습니다. 이후 창 크기나 카메라 구도가 바뀌면 다시 맵을 생성하고 외곽을 확인하세요.
+
+자동 등록은 구역 설정만 완료합니다. 웹은 설정 모드로 전환하고 빈칸 통계는 미확인으로 표시합니다. 저장된 boolean·좌표 내보내기만으로 최신 빈칸을 보장하지 않습니다. 상단 **모드 선택 → 감시 모드**에서 차량 검출을 시작하면 아래 실시간 브리지가 관측 시각·지도 식별자·카메라 세션을 붙여 픽셀 도착 테스트에 전달합니다. 점유 모듈의 `free/occupied/unknown` 규약은 유지합니다.
+
+### 웹 점유와 픽셀 도착 테스트의 실시간 연결
+
+`scripts/parking_occupancy_bridge.js`는 기존 `YOLODetector.detect/postprocess/checkParkingOccupancy` 결과를 재사용합니다. 성공한 postprocess와 오류 반환 `[]`를 구별하고, 모델 오류·다른 구역/소스·캔버스 크기 변경은 빈칸으로 보내지 않습니다. 브라우저의 한 추론을 추가로 실행하지 않습니다. 동일 상태라도 새 추론 결과가 나올 때마다 전송하고 전송 중 중첩은 방지합니다. 전송이 2초 안에 끝나지 않으면 요청을 해제해 다음 새 관측을 보낼 수 있게 합니다. 과거 관측으로 heartbeat를 만들지 않습니다. 감시 중단·통신 유실 시 서버는 TTL로 무효화합니다.
+
+`aruco-result`의 원본 카메라 픽셀 관측을 최대 64개·5초 동안 보관하고, YOLO 입력의 **촬영 시각**에서 가장 가까운 ±150ms 관측과 비교합니다. 추론 완료 후의 최신 위치를 그대로 쓰지 않습니다. 관측 당시 유효한 `detected`·설정된 로버 ID·동일 카메라 세션/종류/원본 크기를 요구하고, 네 모서리를 YOLO 캔버스로 비율 변환합니다. 마커 전체를 포함하고 마커 면적의 30배 이하이며 마커 중심이 박스 내부 10~90%에 있는 후보가 정확히 하나일 때만 그 검출을 로버로 제외합니다. 더 가까운 lost/stale 관측·ID 불일치·부분 겹침·큰 박스·복수 후보에는 제외하지 않습니다. 남은 모든 차량 검출로 기존 점유 계산을 다시 수행해 같은 칸의 다른 차량은 보존합니다. 화면 표시도 같은 필터 결과를 사용합니다.
+
+스냅샷의 `occupancy_scope: other_vehicles_excluding_controlled_rover`는 제어 중인 로버를 제외한 다른 차량 기준임을 명시합니다. `rover_exclusion`은 적용 상태·제외 수·마커 ID/프레임/촬영 시각·시각 차이·캔버스 좌표·제외 박스를 기록하고 GET 점유 상태에도 전달합니다. 일반 차량 전체의 공용 빈칸 정보와 이 로버의 계획용 후보 정보를 스코프로 구분합니다. 모델·카메라·추론을 추가로 실행하지 않습니다.
+
+차량 검출의 최솟값은 **0.70(포함)**입니다. 서버는 `/js/YOLODetector.js`에 인터페이스가 같은 Worker 프록시를 제공하고, `/rover-original-yolo.js`로 기존 소스의 전후처리를 재사용합니다. 모델 추론은 `/parking-detection-worker.js` 안에서 한 번씩 수행하며 WASM 스레드는 하나를 사용합니다. 입력/출력 Tensor를 작업 종료 때 정리하고 모델 오류·누락 출력을 성공한 빈 프레임으로 반환하지 않습니다. 웹의 500ms 반복 호출도 이전 표시·추론이 끝나기 전이면 건너뜁니다. 원본 ParkingHaeven 소스를 덮어쓰거나 메인 스레드 추론으로 자동 대체하지 않습니다. 브라우저가 Worker를 로드하지 못하면 초기화 오류를 해결한 뒤 다시 시험해야 합니다.
+
+`POST /api/parking-occupancy`는 기존 `schema_version: "0.1-draft"` 점유 규약에 필수 `capture_id`, `camera_source`를 추가합니다. 지도 식별자 3개와 관측 시각도 필수입니다. `spaces`의 상태는 `free/occupied/unknown`이며 누락은 unknown입니다. 웹 boolean을 명시적 상태로 변환할 때 `confidence: 0.5`를 소비 기준값으로 사용하며 측정된 모델 정확도/차량 검출 확률을 뜻하지 않습니다. 서버는 과거·미래·역순·중복 관측과 다른 지도/세션을 거부합니다. 최신 스냅샷은 `data/rover_runs/occupancy/latest.json`에 원자적으로 갱신합니다. GET은 원시 상태 `raw_states`와 연속 확인된 `states`, `observed_at`, TTL·나이·fresh를 반환합니다.
+
+픽셀 테스트도 공통 기본 **5초 TTL**을 적용합니다. 촬영 시각으로부터 만료시키며 수신/조회 시각으로 오래된 프레임의 수명을 늘리지 않습니다. free는 최소 3개의 새 관측이 촬영 시각 기준 2초 이상에 걸쳐 판정돼야 후보로 인정하고 occupied/unknown은 즉시 반영합니다. 연속성 검사는 `(이번 촬영 시각 - 이전 촬영 시각)`으로 수행해 추론 시간을 공백에 더하지 않습니다. 새 관측 없이 대기한 시간은 확인 기간에 포함하지 않습니다. 실제 관측 공백이 TTL을 넘으면 free 확인을 다시 시작합니다. ArUco 위치 만료는 별도 200ms를 유지합니다. 저장 파일 소비자도 관측 시각·TTL·현재 지도 식별자를 확인해야 합니다.
+
+웹 조건/칸 목록은 고유 ID 목록이 바뀔 때만 항목을 생성합니다. 같은 ID에 대한 상태 변화에서는 기존 option·선택값을 유지하며 조건 이름은 목표와 분리해 고정 표시합니다. 칸 목록에 포커스가 있으면 표시 글자 갱신은 blur까지 보류하되, 최신 서버 상태에 따른 시작 차단은 계속 적용합니다. 점유 연결 표시는 서버 상태를 기준으로 통일하고 관측 나이·만료 시간을 함께 표시합니다.
+
+`ArrivalTest`는 HTTP 서버에서 항상 `LiveParking`을 연결합니다. 조건별 후보는 기존 `parking_selector`의 순위와 유형 제한을 유지하며 최신 free만 넘깁니다. 시작 요청의 `parking_space_id`(생략/null이면 자동)와 `auto_retarget`(기본 true)이 추가됐습니다. 직접 지정한 occupied는 거부하고 안내하지 않습니다. 초기 경로는 유효한 ArUco 관측 후 현재 위치를 가장 가까운 도로 간선 픽셀에 투영해 시작합니다. 그 간선을 두 조각으로 나누고 평행 간선·방향·도로 마스크를 검증한 경로를 사용합니다. 상단 마커 투영이 실제 바닥 로버 중심을 뜻하지는 않습니다.
+
+도착 목표는 **칸 중앙**입니다. `arrival_geometry.arrival_circle`이 `polygon_px`의 면적과 기하 중심을 사용하고, 구버전 지도에 외곽이 없으면 bbox를 사용합니다. 요청 `arrival_area_ratio`는 기본 0.5, 허용 0.1~0.75입니다. `sqrt(칸 면적 × 비율 / π)`로 반지름을 구하고, 중심부터 가장 가까운 변까지 거리로 제한해 원 전체를 칸 안에 둡니다. `arrival_region`은 `center_px`, `radius_px`, `parking_area_px2`, `requested_area_ratio`, `actual_area_ratio`, `max_radius_px`, `geometry_source`를 포함합니다. 화면과 서버가 같은 중심·반지름을 사용하며 여전히 1초 안정 유지·최소 5관측으로 판정합니다. 목적지 변경 시 새 칸의 중심·반지름·도착 유지 시간을 함께 갱신합니다. HTTP 실시간 모드에서는 이전 요청의 `radius_px` 대신 면적 비율로 반지름을 결정합니다.
+
+실시간 상태의 `target_reference: parking_space_center`, `waypoint_target: parking_center`, `goal_px`는 칸 중앙을 가리킵니다. `road_goal_px`와 앞의 `road_waypoint_count`개 좌표는 기존 도로 검증 구간입니다. `parking_approach_px`는 그 진입점부터 중앙까지 이어 붙인 직선 픽셀 미리보기(`parking_approach_mode: straight_line_preview`)입니다. 이 마지막 구간에는 도로 마스크 조건을 적용하지 않으며 실제 충돌 회피·회전반경·주차 기동 검증으로 해석하지 않습니다. 기존 상단 5개 정적 파일의 계약은 그대로입니다.
+
+새 최적 빈칸으로 변경할 때 도착 유지 시간을 초기화하고 `route_revision`, `replan_count`, `target_changes`를 갱신합니다. 같은 상태의 경로는 캐시합니다. 현재 목표가 free이며 반경의 두 배 이내면 유지하고, 반복 변경은 2초 간격으로 제한합니다. 현재 목표 occupied에는 이 제한 없이 대체 빈칸을 찾습니다. 수동 지정·자동 변경 해제·후보 없음·점유 만료에는 `status: blocked`, `guidance_available: false`, 빈 `waypoints`로 안내를 차단합니다. 마커가 없으면 현재 위치 경로를 표시하지 않으며 success 이후에는 목표를 유지합니다. 실제 cm 경로·모터 제어·주차 기동·도로 위 차량 장애물 회피는 이번 변경 범위에 포함하지 않습니다.
+
+단, 유효한 로버 위치가 현재 도착 원 안에 들어오면 `arrival_committed: true`로 그 목표를 고정합니다. 이 시점 이후에는 occupied/unknown도 다른 칸으로 재선택하지 않고 blocked로 확인을 기다립니다. 목표가 고정돼도 다른 차량을 free로 바꾸거나 도착 유지 시간을 우회하지 않습니다. 검증된 로버 제외 결과로 free가 유지될 때 기존 1초 안정 판정을 수행합니다. 새 테스트 시작 시 고정을 초기화합니다.
+
 HTTP 지도 생성은 `scripts.http_map_server`가 수신 PNG에서 OCR 힌트를 새로 생성합니다. 기존 카메라 종횡비나 수동 힌트·전지 외곽을 기본으로 재사용하지 않습니다. 검증된 결과는 고정 폴더 `data/http_map_captures/latest/`에 덮어쓰고, 실패 진단은 `last_failed/`만 갱신합니다. 실패 시 직전 성공 지도를 보존합니다. `capture_id`는 기록용이고 실제 폴더는 응답의 `output_directory`를 사용합니다. 생성한 지도를 기본 지도·ROI·보정·점유와 연결할 때는 위 지도 식별자와 사진 해시 계약을 별도로 맞춰야 합니다. 카메라 이동 후 기존 ROI를 그대로 사용하면 안 됩니다.
 
 기본 OCR 모드는 동일 캡처의 지도에서 5개 조건별 픽셀 경로도 생성합니다. 응답의 `route_generation`에 별도 성공/실패 상태와 결과 URL이 추가되며 기존 지도 필드는 유지합니다. 다운로드 JSON에도 동일한 지도 ID·사진 해시·ID 버전이 들어갑니다. `planning_mode: static_map`, `occupancy_checked: false`이며 실제 빈칸을 보장하지 않습니다. 끝점은 주차칸에 연결된 도로 노드입니다. 경로 실패 시 지도는 보존하고 미완성 경로는 게시하지 않습니다.
@@ -61,6 +97,7 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 - 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
 - HTTP에서 `--marker-layout`를 사용하면 같은 캡처의 픽셀 경로를 재사용해 `latest/world/`에 보정 결과를 저장합니다. API의 `world_calibration.status`가 `verified`이면 주차칸 중앙까지의 cm 경로를 제공합니다. 픽셀 도착 시험은 `route_generation`의 진입점을 사용합니다. [HTTP 자동 보정 실행 방법](../README.md#같은-http-사진으로-cm-지도-만들기)
 - `POST /api/aruco`, `GET /api/rover-pose`에서는 ID 7의 `rover.center_px`·`rover.heading_deg`를 카메라 픽셀과 영상 방향각으로 제공합니다. 목표 전송 주기는 100ms이며, 수신 후 200ms가 지나거나 마커를 잃으면 위치를 비웁니다. 로버 상단 마커를 월드 cm로 전달하려면 마커 높이와 로버 중심 오프셋의 실측 검증이 필요합니다.
+- ArUco 전송은 원본 해상도의 JPEG 품질 0.85를 기본으로 하고 기존 `image/png`도 수신합니다. 이미지 디코딩 전 JPEG 헤더/PNG IHDR의 해상도 제한을 검사합니다. 지도 캡처 API는 계속 PNG만 받습니다. 브라우저는 인코딩 200ms 초과 시 전송을 버리고 HTTP 요청은 1초에 종료합니다. 좌표 만료는 계속 200ms이며 촬영 시각도 확인합니다. `detection_status`는 실제 검출 결과이고 `tracking_status`는 만료를 반영한 상태입니다. 늦은 프레임에서는 마커를 검출했어도 `rover:null`입니다. UI는 인코딩·전송/응답·서버 검출 시간을 분리 표시하고, 카메라 변경 도중의 프레임과 중복 영상 프레임을 재사용하지 않습니다.
 
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.

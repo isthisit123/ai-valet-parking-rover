@@ -73,6 +73,12 @@ class HttpMapServerTest(unittest.TestCase):
         self.assertFalse(route["occupancy_checked"])
         path = self.output / route_url.removeprefix("/captures/")
         self.assertEqual(load_route(path, require_verified=True).map_id, DEFAULT_MAP.map_id)
+        cm_map_url = world["cases"][0]["files"]["preview"].replace(".png", ".json")
+        with urlopen(self.url + cm_map_url) as response:
+            cm_map = json.load(response)
+        cm_spaces = [r for r in cm_map["regions"] if r.get("type") in ("normal", "accessible")]
+        self.assertEqual(len(cm_spaces), 6)
+        self.assertTrue(all("polygon_cm" in r and "polygon_px" not in r for r in cm_spaces))
 
         layout["markers_cm"]["E"] = [58.0, 48.19]
         with self.post(body) as response:
@@ -115,6 +121,17 @@ class HttpMapServerTest(unittest.TestCase):
         semantic = json.loads((folder / "semantic.json").read_text(encoding="utf-8"))
         self.assertEqual(len(semantic["regions"]), 10)
         self.assertEqual(semantic["map_image_sha256"], hashlib.sha256(body).hexdigest())
+        roi = report["parking_regions"]
+        self.assertEqual(roi["status"], "generated")
+        self.assertEqual([r["id"] for r in roi["regions"]], [f"P{i}" for i in range(1, 7)])
+        self.assertTrue(all(len(r["points"]) == 4 for r in roi["regions"]))
+        self.assertEqual(roi["map_image_sha256"], semantic["map_image_sha256"])
+        with urlopen(self.url + report["files"]["parking_regions"]) as response:
+            self.assertEqual(json.load(response), roi)
+        with urlopen(self.url + "/") as response:
+            self.assertIn('/parking-regions-bridge.js', response.read().decode())
+        with urlopen(self.url + "/parking-regions-bridge.js") as response:
+            self.assertIn('RoverParkingRegions', response.read().decode())
         routes = report["route_generation"]
         self.assertEqual(routes["status"], "generated")
         self.assertEqual(routes["planning_mode"], "static_map")
@@ -145,6 +162,17 @@ class HttpMapServerTest(unittest.TestCase):
         with urlopen(self.url + report["files"]["preview"]) as response:
             self.assertTrue(response.read().startswith(b"\x89PNG"))
         self.assertEqual(baseline, {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in baseline})
+
+    def test_region_export_failure_keeps_map_and_routes_without_partial_roi(self):
+        with patch("scripts.http_map_server.export_parking_regions", side_effect=ValueError("invalid polygon")):
+            with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+                report = json.load(response)
+        self.assertTrue(report["published_as_latest"])
+        self.assertEqual(report["status"], "map_generated")
+        self.assertEqual(report["route_generation"]["status"], "generated")
+        self.assertEqual(report["parking_regions"], {"status": "failed", "error": "invalid polygon"})
+        self.assertNotIn("parking_regions", report["files"])
+        self.assertFalse((Path(report["output_directory"]) / "parking_regions.json").exists())
 
     def test_repeated_success_overwrites_fixed_files_without_accumulating_folders(self):
         old = self.output / "old_capture"

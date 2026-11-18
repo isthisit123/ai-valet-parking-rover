@@ -75,6 +75,7 @@ class ArucoTracker:
             status = "detected" if len(matches) == 1 else "ambiguous" if matches else "lost"
             self._latest = {
                 "tracking_status": status, "dictionary": self.dictionary, "rover_marker_id": self.marker_id,
+                "detection_status": status,
                 "width": image.shape[1], "height": image.shape[0], "markers": markers,
                 "rover": matches[0] if status == "detected" else None,
                 "coordinate_frame": "camera_image", "unit": "pixel", "origin": "top_left",
@@ -111,6 +112,16 @@ class ArucoTracker:
                         "pose_status": "calibration_required", "map_pose": None}
             result = deepcopy(self._latest)
             result["age_ms"] = max(0, time.monotonic() - result["received_monotonic_s"]) * 1000
-            if result["age_ms"] > result["valid_for_ms"]:
+            capture_valid = True
+            if result.get("client_captured_at"):
+                try:
+                    captured = datetime.fromisoformat(result["client_captured_at"].replace("Z", "+00:00"))
+                    if captured.utcoffset() is None:
+                        raise ValueError("촬영 시각에 시간대가 필요합니다.")
+                    result["capture_age_ms"] = (datetime.now(timezone.utc) - captured).total_seconds() * 1000
+                    capture_valid = -50 <= result["capture_age_ms"] <= result["valid_for_ms"]
+                except (ValueError, TypeError):
+                    capture_valid = False
+            if result["age_ms"] > result["valid_for_ms"] or not capture_valid:
                 result.update(tracking_status="stale", rover=None, markers=[])
             return result

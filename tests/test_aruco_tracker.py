@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import cv2
 import numpy as np
@@ -18,6 +19,22 @@ def marker_image(marker_id=7):
 
 
 class ArucoTrackerTest(unittest.TestCase):
+    def test_delayed_or_future_capture_never_exposes_detected_marker_as_current_pose(self):
+        image = marker_image()
+        for seconds in (-3, 3):
+            with self.subTest(seconds=seconds):
+                captured = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+                result = ArucoTracker().observe(image, client_captured_at=captured)
+                self.assertEqual(result['detection_status'], 'detected')
+                self.assertEqual(result['tracking_status'], 'stale')
+                self.assertIsNone(result['rover'])
+
+    def test_invalid_or_timezone_missing_capture_time_cannot_supply_current_pose(self):
+        for captured in ('bad-time', '2026-11-18T10:00:00'):
+            result = ArucoTracker().observe(marker_image(), client_captured_at=captured)
+            self.assertEqual(result['tracking_status'], 'stale')
+            self.assertIsNone(result['rover'])
+
     def test_detects_id_and_four_rotations_with_image_heading(self):
         tracker = ArucoTracker()
         for turns in range(4):

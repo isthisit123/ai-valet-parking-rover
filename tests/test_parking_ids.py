@@ -222,6 +222,41 @@ class ParkingIdsTest(unittest.TestCase):
         self.assertEqual(building["bbox"], [30, 40, 60, 50])
         self.assertEqual(entrance["bbox"], [130, 40, 60, 50])
 
+    def test_dark_region_retry_fills_large_text_gap_only_for_missing_gate(self):
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        image[110:, 200:] = 105
+        image[35:85, 30:90] = 20
+        image[130:202, 220:300] = 20
+        image[130:202, 254:272] = 255
+        labels = [{"id": "building_a", "hint": [60, 60]},
+                  {"id": "exit", "hint": [263, 165]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        building_index, = semantic_mapper.matching_region_indices(initial, labels[0]["hint"])
+        self.assertFalse(semantic_mapper.matching_region_indices(initial, labels[1]["hint"]))
+        # 기존 13px 메우기로는 이름표 중심의 18px 틈을 복원하지 못한다.
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        candidates = semantic_mapper.extract_dark_regions(hsv, closing=(13, 13), value_limit=90)
+        self.assertFalse(semantic_mapper.matching_region_indices(candidates, labels[1]["hint"]))
+
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        building, exit_region = semantic_mapper.assign_dark_facilities(recovered, labels)
+        self.assertEqual(building["bbox"], initial[building_index]["bbox"])
+        self.assertEqual(exit_region["bbox"], [220, 130, 80, 72])
+        self.assertEqual(len(recovered), len(initial) + 1)
+
+    def test_dark_region_large_closing_rejects_candidate_with_two_hints(self):
+        image = np.full((300, 400, 3), 105, dtype=np.uint8)
+        image[130:202, 220:300] = 20
+        image[130:202, 254:272] = 255
+        labels = [{"id": "entrance", "hint": [259, 165]},
+                  {"id": "exit", "hint": [266, 165]}]
+        _, _, initial, _ = semantic_mapper.detect_regions(image, map_id=REAL_MAP_ID)
+        recovered = semantic_mapper.recover_dark_regions(image, initial, labels)
+        for label in labels:
+            self.assertFalse(semantic_mapper.matching_region_indices(recovered, label["hint"]))
+        with self.assertRaisesRegex(ValueError, "검은색 영역이 0개"):
+            semantic_mapper.assign_dark_facilities(recovered, labels)
+
     def test_real_map_matches_dim_blue_and_edge_touching_dark_facilities(self):
         image = np.full((300, 400, 3), 255, dtype=np.uint8)
         for x, y in ((30, 30), (310, 30), (30, 190), (339, 190)):

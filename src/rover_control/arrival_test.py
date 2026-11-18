@@ -15,7 +15,7 @@ from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES
 
 
 class ArrivalTest:
-    def __init__(self, map_root, *, marker_id=7, output_path=None, map_lock=None):
+    def __init__(self, map_root, *, marker_id=7, output_path=None, map_lock=None, parking=None):
         self.map_root = Path(map_root).resolve()
         self.marker_id = marker_id
         self.output_path = Path(output_path) if output_path is not None else None
@@ -28,8 +28,11 @@ class ArrivalTest:
         self.hold_start = None
         self.anchor = None
         self.samples = 0
+        self.parking = parking
+        self.parking_signature = None
+        self.last_retarget = None
 
-    def catalog(self):
+    def catalog(self, *, live=True):
         try:
             with self.map_lock:
                 folder = self.map_root / "latest"
@@ -59,20 +62,35 @@ class ArrivalTest:
                         raise ValueError("도착점이 지도 범위를 벗어났습니다.")
                     cases.append({"case_id": case_id, "parking_space_id": route["parking_space_id"],
                                   "goal_px": goal, "preview": f"/captures/latest/routes/{case_id}.png"})
-                return {"ready": True, "capture_id": report["capture_id"], **identity,
-                        "image_size_px": size, "camera_source": source, "cases": cases}
+                result = {"ready": True, "capture_id": report["capture_id"], **identity,
+                          "image_size_px": size, "camera_source": source, "cases": cases}
+            # map_lock 밖에서 점유 잠금을 얻어 게시/점유 요청 간 잠금 역전을 피한다.
+            if self.parking is not None and live:
+                result["occupancy"] = self.parking.current()
+                result["spaces"] = [{"parking_space_id": key, "status": value,
+                                     "type": "accessible" if key in ("space_3", "space_6") else "normal"}
+                                    for key, value in result["occupancy"]["states"].items()]
+                for case in cases:
+                    try:
+                        case.update(self.parking.plan(case["case_id"]))
+                    except ValueError as error:
+                        case.update(available=False, parking_space_id=None, goal_px=None, waypoints=[], message=str(error))
+            return result
         except FileNotFoundError:
             return {"ready": False, "error": "카메라를 켜고 지도와 5개 경로를 한 번 생성하세요.", "cases": []}
         except (OSError, ValueError, KeyError, TypeError, IndexError, ZeroDivisionError) as error:
             return {"ready": False, "error": str(error), "cases": []}
 
-    def start(self, case_id, *, capture_id, radius_px=15, hold_seconds=1.0):
+    def start(self, case_id, *, capture_id, radius_px=15, hold_seconds=1.0,
+              parking_space_id=None, auto_retarget=True, arrival_area_ratio=0.5):
         if type(radius_px) not in (int, float) or not isfinite(radius_px) or not 3 <= radius_px <= 100:
             raise ValueError("도착 반경은 지도 기준 3~100px이어야 합니다.")
         if type(hold_seconds) not in (int, float) or not isfinite(hold_seconds) or not 0.5 <= hold_seconds <= 5:
             raise ValueError("유지 시간은 0.5~5초여야 합니다.")
+        if type(auto_retarget) is not bool:
+            raise ValueError("자동 목적지 변경은 true/false여야 합니다.")
         with self.lock:
-            catalog = self.catalog()
+            catalog = self.catalog(live=False)
             if not catalog["ready"]:
                 raise ValueError(catalog["error"])
             if catalog["capture_id"] != capture_id:
@@ -80,6 +98,12 @@ class ArrivalTest:
             matches = [case for case in catalog["cases"] if case["case_id"] == case_id]
             if len(matches) != 1:
                 raise ValueError("생성된 5개 테스트케이스 중 하나를 선택하세요.")
+            if self.parking is not None:
+                plan = self.parking.plan(case_id, parking_space_id=parking_space_id, arrival_area_ratio=arrival_area_ratio)
+                if plan["capture_id"] != capture_id:
+                    raise ValueError("지도가 갱신됐습니다. 테스트 목록을 다시 불러오세요.")
+                matches[0].update(plan)
+                radius_px = plan["arrival_region"]["radius_px"]
             self.state = {"status": "waiting_for_tracking", "planning_mode": "image_pixel_test",
                           "coordinate_frame": "map_image", "unit": "pixel",
                           "position_reference": "marker_center_on_rover_top", "target_reference": "parking_road_node",
@@ -91,6 +115,13 @@ class ArrivalTest:
                           "stability_px": min(5.0, radius_px / 3), "current_position_px": None,
                           "distance_px": None, "held_seconds": 0, "sample_count": 0,
                           "started_at": datetime.now(timezone.utc).isoformat()}
+            if self.parking is not None:
+                self.state.update(requested_parking_space_id=parking_space_id, auto_retarget=auto_retarget,
+                                  arrival_area_ratio=arrival_area_ratio,
+                                  arrival_committed=False,
+                                  guidance_available=False, route_needs_position=True, route_revision=1,
+                                  replan_count=0, target_changes=[])
+                self.parking_signature = self.last_retarget = None
             self.last_received = self.last_frame = None
             self._reset_hold()
             self._save()
@@ -120,6 +151,7 @@ class ArrivalTest:
         with self.lock:
             self._reset_hold()
             self.state.update(status="stopped", reason=reason, current_position_px=None, distance_px=None)
+            self.state["guidance_available"] = False
             self._save()
             return deepcopy(self.state)
 
@@ -138,18 +170,75 @@ class ArrivalTest:
         if not unchanged:
             self._reset_hold()
             self.state.update(status="invalidated", reason="map_changed", current_position_px=None, distance_px=None)
+            self.state["guidance_available"] = False
             self._save()
 
     def current(self, *, now=None):
         now = time.monotonic() if now is None else now
         with self.lock:
             self._check_map()
+            if self.parking is not None:
+                self._refresh_parking(now)
             if (self.state["status"] in ("running", "holding", "waiting_for_tracking") and
                     self.last_received is not None and now - self.last_received > 0.20):
                 self._reset_hold()
                 self.state.update(status="waiting_for_tracking", reason="tracking_stale", current_position_px=None, distance_px=None)
+                if self.parking is not None:
+                    self.state["guidance_available"] = False
                 self._save()
             return deepcopy(self.state)
+
+    def _refresh_parking(self, now):
+        if self.state["status"] in ("idle", "stopped", "invalidated", "success"):
+            return
+        try:
+            live = self.parking.current(now=now)
+            self.state["occupancy"] = live
+            self.state["occupancy_observed_at"] = live["observed_at"]
+            signature = (live["capture_id"], tuple(sorted(live["states"].items())))
+            fresh_pose = self.last_received is not None and 0 <= now - self.last_received <= 0.20
+            position = self.state.get("current_position_px") if fresh_pose else None
+            pending = self.state.get("route_needs_position") and position is not None
+            if signature == self.parking_signature and not pending:
+                return
+            self.parking_signature = signature
+            requested = self.state.get("requested_parking_space_id")
+            if self.state.get("arrival_committed") or requested is None and not self.state["auto_retarget"]:
+                requested = self.state["parking_space_id"]
+            plan = self.parking.plan(self.state["case_id"], parking_space_id=requested, position=position, now=now,
+                                     arrival_area_ratio=self.state["arrival_area_ratio"])
+            previous = self.state["parking_space_id"]
+            changed = plan["parking_space_id"] != previous
+            previous_free = live["states"].get(previous) == "free"
+            if changed and previous_free:
+                near_goal = self.state.get("distance_px") is not None and self.state["distance_px"] <= 2 * self.state["radius_px"]
+                cooling = self.last_retarget is not None and now - self.last_retarget < 2.0
+                if near_goal or cooling:
+                    if cooling and not near_goal:
+                        self.parking_signature = None
+                    return
+            if changed or pending or self.state["status"] == "blocked":
+                self._reset_hold()
+                self.state.update(plan, status="running" if position is not None else "waiting_for_tracking",
+                                  radius_px=plan["arrival_region"]["radius_px"],
+                                  stability_px=min(5.0, plan["arrival_region"]["radius_px"] / 3),
+                                  guidance_available=position is not None, route_needs_position=position is None,
+                                  route_revision=self.state["route_revision"] + 1,
+                                  replan_count=self.state["replan_count"] + 1, distance_px=None)
+                self.state.pop("reason", None)
+                if changed:
+                    self.last_retarget = now
+                    self.state["target_changes"] = [*self.state["target_changes"],
+                        {"from": previous, "to": plan["parking_space_id"],
+                         "at": datetime.now(timezone.utc).isoformat(), "reason": "occupancy_changed"}][-20:]
+                if position is None:
+                    self.state["waypoints"] = []
+                self._save()
+        except (ValueError, OSError, KeyError) as error:
+            self._reset_hold()
+            self.state.update(status="blocked", reason=str(error), guidance_available=False,
+                              route_needs_position=True, waypoints=[], distance_px=None)
+            self._save()
 
     def observe(self, observation, *, now=None):
         now = time.monotonic() if now is None else now
@@ -160,6 +249,7 @@ class ArrivalTest:
             if observation.get("camera_source") != self.state["camera_source"]:
                 self._reset_hold()
                 self.state.update(status="invalidated", reason="camera_changed", current_position_px=None, distance_px=None)
+                self.state["guidance_available"] = False
                 self._save()
                 return deepcopy(self.state)
             if self.state["status"] == "success":
@@ -179,12 +269,14 @@ class ArrivalTest:
             if not valid:
                 self._reset_hold()
                 self.state.update(status="waiting_for_tracking", reason="tracking_unavailable", current_position_px=None, distance_px=None)
+                self.state["guidance_available"] = False
                 self._save()
                 return deepcopy(self.state)
             source = self.state["camera_source"]
             if (observation.get("width"), observation.get("height")) != (source["width"], source["height"]):
                 self._reset_hold()
                 self.state.update(status="invalidated", reason="camera_resolution_changed", current_position_px=None, distance_px=None)
+                self.state["guidance_available"] = False
                 self._save()
                 return deepcopy(self.state)
             frame_key = observation.get("frame_id") or received
@@ -200,6 +292,16 @@ class ArrivalTest:
                         y * self.state["image_size_px"][1] / source["height"]]
             distance = dist(position, self.state["goal_px"])
             self.state.update(current_position_px=position, distance_px=distance)
+            if self.parking is not None:
+                if distance <= self.state["radius_px"]:
+                    # 진입한 칸에서 점유가 변하면 다른 칸으로 점프하지 않고 확인을 기다린다.
+                    self.state["arrival_committed"] = True
+                self._refresh_parking(now)
+                if self.state["status"] == "blocked":
+                    self._save()
+                    return deepcopy(self.state)
+                distance = dist(position, self.state["goal_px"])
+                self.state.update(distance_px=distance, guidance_available=True)
             self.state.pop("reason", None)
             if distance > self.state["radius_px"]:
                 self._reset_hold()

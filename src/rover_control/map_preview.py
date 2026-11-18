@@ -137,9 +137,10 @@ def build_map(semantic, source_route, matrix, size, *, verified):
         x, y, w, h = region["bbox"]
         center, = convert([region["center"]])
         regions.append({
-            **{k: v for k, v in region.items() if k not in ("bbox", "center", "area")},
+            **{k: v for k, v in region.items() if k not in ("bbox", "center", "area", "polygon_px")},
             "center_cm": center,
             "box_corners_cm": convert([(x, y), (x + w, y), (x + w, y + h), (x, y + h)]),
+            **({"polygon_cm": convert(region["polygon_px"])} if "polygon_px" in region else {}),
         })
     road_points = source_route["waypoints"]
     center_px = parking_center_pixel(source_route, semantic)

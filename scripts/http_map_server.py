@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from shutil import copy2, copytree
+from shutil import copy2, copytree, rmtree
 from tempfile import TemporaryDirectory
 from urllib.parse import unquote, urlsplit
 
@@ -43,6 +43,18 @@ DETECTION_WORKER_PATH = Path(__file__).with_name("parking_detection_worker.js")
 DETECTOR_PROXY_PATH = Path(__file__).with_name("parking_detector_proxy.js")
 PARKING_REGIONS_BRIDGE_PATH = Path(__file__).with_name("parking_regions_bridge.js")
 PUBLISH_LOCK = threading.RLock()
+
+
+def rename_for_publish(source, target):
+    # OneDrive·미리보기·백신 등이 디렉터리를 잠깐 잡는 Windows 오류만 재시도한다.
+    delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+    for attempt in range(len(delays) + 1):
+        try:
+            return source.rename(target)
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
 
 
 def write_json(path, data):
@@ -386,16 +398,32 @@ def generate_map(body, output_root, **options):
                 raise ValueError("고정 결과 폴더가 지정한 출력 폴더 밖을 가리킵니다.")
             report["latest_preserved"] = not complete and (output_root / "latest").is_dir()
             write_json(pending / "report.json", report)
-            backup = scratch / "previous"
+            # 복원도 잠길 경우 TemporaryDirectory 정리가 이전 지도를 삭제하지 않도록
+            # 백업은 임시 빌드 폴더 밖에 둔다.
+            backup = output_root / (".previous-" + uuid.uuid4().hex)
             had_previous = target.exists()
             if had_previous:
-                target.rename(backup)
+                rename_for_publish(target, backup)
             try:
-                pending.rename(target)
-            except OSError:
+                rename_for_publish(pending, target)
+            except OSError as error:
                 if had_previous:
-                    backup.rename(target)
-                raise
+                    try:
+                        rename_for_publish(backup, target)
+                    except OSError as restore_error:
+                        raise OSError(f"지도 게시·복원 실패: 이전 결과는 {backup}에 보존했습니다. "
+                                      f"폴더 잠금을 해제한 뒤 복원하세요. {restore_error}") from error
+                raise OSError(f"지도 결과 폴더 교체 실패: {target}. 기존 결과는 보존했습니다. "
+                              f"열린 이미지·폴더 미리보기와 동기화 잠금을 확인하고 다시 시도하세요. {error}") from error
+            if had_previous:
+                if backup.is_symlink() or backup.resolve().parent != output_root:
+                    raise ValueError("이전 결과 백업이 출력 폴더 밖을 가리킵니다.")
+                try:
+                    rmtree(backup)
+                except OSError as cleanup_error:
+                    # 새 지도 게시 자체는 성공했다. 잠긴 백업은 삭제하지 않고 위치를 알린다.
+                    report["cleanup_warning"] = f"이전 결과 백업 정리 대기: {backup}. {cleanup_error}"
+                    print(report["cleanup_warning"], flush=True)
     return report
 
 

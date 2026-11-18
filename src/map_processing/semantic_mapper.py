@@ -537,6 +537,18 @@ def create_semantic_map(
     normal, accessible, buildings, gates = detect_regions(
         image, map_id=map_id, real_profile=real_profile, low_light=low_light,
     )
+    parking_retry = False
+    parking_specs = label_data.get("parking_spaces")
+    if (real_profile and not low_light and isinstance(parking_specs, list)
+            and len(normal) + len(accessible) != len(parking_specs)):
+        print("주차칸 수가 OCR 힌트와 달라 같은 사진을 어두운 영상 기준으로 재검출합니다.", flush=True)
+        retry_normal, retry_accessible, _, _ = detect_regions(
+            image, map_id=map_id, real_profile=True, low_light=True,
+        )
+        # 개수만 맞추지 않고 각 칸의 유형·고유 ID·힌트가 유일하게 대응하는지도 검사한다.
+        assign_parking_ids(retry_normal, retry_accessible, parking_specs)
+        normal, accessible = retry_normal, retry_accessible
+        parking_retry = True
     if real_profile:
         buildings = recover_dark_regions(image, buildings, label_data["buildings"] + label_data["gates"])
     print("Normal spaces detected:", len(normal))
@@ -549,6 +561,8 @@ def create_semantic_map(
     semantic_data = map_semantics(
         graph_data, label_data, (normal, accessible, buildings, gates), expected_map_id=expected_map_id
     )
+    if parking_retry:
+        semantic_data["parking_detection_profile"] = "low_light_retry"
     if real_profile:
         print("매칭된 건물:", len(label_data["buildings"]))
         print("매칭된 입출구:", len(label_data["gates"]))

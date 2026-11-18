@@ -222,15 +222,68 @@ class HttpMapServerTest(unittest.TestCase):
 
         def fail_ready(path, target):
             if path.name == "ready":
-                raise OSError("test publish failure")
+                error = PermissionError("test publish failure")
+                error.winerror = 5
+                raise error
             return original(path, target)
 
-        with patch("scripts.http_map_server.Path.rename", new=fail_ready):
+        with patch("scripts.http_map_server.Path.rename", new=fail_ready), \
+                patch("scripts.http_map_server.time.sleep") as sleep:
             with self.assertRaises(HTTPError) as failure:
                 self.post(DEFAULT_MAP.image_path.read_bytes())
+            self.assertEqual(sleep.call_count, 5)
         failure.exception.close()
         self.assertEqual(before, {p.relative_to(latest): p.read_bytes() for p in latest.rglob("*") if p.is_file()})
         self.assertEqual({p.name for p in self.output.iterdir()}, {"latest"})
+
+    def test_temporary_windows_publish_lock_retries_then_succeeds(self):
+        with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+            json.load(response)
+        original = Path.rename
+        attempts = []
+
+        def transient_lock(path, target):
+            if path.name == 'ready':
+                attempts.append(path)
+                if len(attempts) <= 2:
+                    error = PermissionError('temporary directory lock')
+                    error.winerror = 5
+                    raise error
+            return original(path, target)
+
+        with patch('scripts.http_map_server.Path.rename', new=transient_lock), \
+                patch('scripts.http_map_server.time.sleep') as sleep:
+            with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+                report = json.load(response)
+            self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(report['published_as_latest'])
+        self.assertEqual(json.loads((self.output / 'latest/report.json').read_text(encoding='utf-8'))['capture_id'],
+                         report['capture_id'])
+        self.assertEqual({p.name for p in self.output.iterdir()}, {'latest'})
+
+    def test_failed_rollback_preserves_previous_map_outside_temporary_build(self):
+        with self.post(DEFAULT_MAP.image_path.read_bytes()) as response:
+            json.load(response)
+        latest = self.output / 'latest'
+        before = {p.relative_to(latest): p.read_bytes() for p in latest.rglob('*') if p.is_file()}
+        original = Path.rename
+
+        def locked_publish_and_restore(path, target):
+            if path.name == 'ready' or path.name.startswith('.previous-'):
+                raise OSError('persistent directory lock')
+            return original(path, target)
+
+        with patch('scripts.http_map_server.Path.rename', new=locked_publish_and_restore), \
+                self.assertRaises(HTTPError) as failure:
+            self.post(DEFAULT_MAP.image_path.read_bytes())
+        with failure.exception as response:
+            error = json.load(response)['error']
+        backups = list(self.output.glob('.previous-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0]), error)
+        self.assertEqual(before, {p.relative_to(backups[0]): p.read_bytes()
+                                 for p in backups[0].rglob('*') if p.is_file()})
 
     def test_invalid_second_route_keeps_map_and_publishes_no_partial_routes(self):
         calls = []

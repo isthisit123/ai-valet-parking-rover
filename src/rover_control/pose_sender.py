@@ -2,6 +2,7 @@
 
 import argparse
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 from math import atan2, cos, degrees, radians, sin
 from pathlib import Path
@@ -21,13 +22,50 @@ from .drive import encode
 from .tracking import CONTROL_PERIOD_S, POSE_MAX_AGE_S, number
 
 
+def load_camera_position(folder):
+    folder = Path(folder)
+    path = folder / "world/camera_position.json"
+    if not path.is_file():
+        raise ValueError("저장된 카메라 실측값이 없습니다. --camera-position-cm X Y Z를 입력하세요.")
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    position = settings.get("camera_position_cm")
+    if not isinstance(position, list) or len(position) != 3:
+        raise ValueError("저장된 카메라 위치에는 실측 [X, Y, Z]가 필요합니다.")
+    for filename, field in (("report.json", "capture_report_sha256"),
+                            ("world/map_calibration.json", "calibration_sha256")):
+        if settings[field] != sha256((folder / filename).read_bytes()).hexdigest():
+            raise ValueError("저장한 카메라 위치와 현재 지도·보정이 다릅니다. 현재 렌즈 위치를 다시 입력하세요.")
+    return settings
+
+
+def save_camera_position(converter):
+    converter.require_current()
+    settings = {**converter.identity, "camera_source": converter.camera_source,
+                "coordinate_frame": "world", "unit": "cm", "origin": WORLD_ORIGIN, "axis_directions": AXES,
+                "capture_report_sha256": sha256(converter.report_bytes).hexdigest(),
+                "calibration_sha256": sha256(converter.calibration_bytes).hexdigest(),
+                "camera_position_cm": converter.camera_position.tolist(),
+                "marker_height_cm": converter.marker_height}
+    path = converter.folder / "world/camera_position.json"
+    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 class CapturePose:
-    def __init__(self, folder, *, marker_id=7, center_offset_cm=(0.0, 0.0)):
+    def __init__(self, folder, *, marker_id=7, center_offset_cm=(0.0, 0.0),
+                 camera_position_cm=None, marker_height_cm=10.5):
         self.folder = Path(folder)
         self.marker_id = marker_id
         self.offset = tuple(number(value) for value in center_offset_cm)
         if len(self.offset) != 2:
             raise ValueError("중심 오프셋 [전방, 오른쪽] cm가 필요합니다.")
+        self.marker_height = number(marker_height_cm)
+        if self.marker_height < 0:
+            raise ValueError("마커 높이는 0 이상이어야 합니다.")
+        self.camera_position = None
+        if camera_position_cm is not None:
+            self.camera_position = np.asarray([number(value) for value in camera_position_cm])
+            if self.camera_position.shape != (3,) or self.camera_position[2] <= self.marker_height:
+                raise ValueError("카메라 렌즈의 [x, y, z] cm가 필요하고 z는 마커 높이보다 커야 합니다.")
 
         self.report_bytes = (self.folder / "report.json").read_bytes()
         report = json.loads(self.report_bytes)
@@ -47,6 +85,10 @@ class CapturePose:
         self.identity = configured_map_identity(self.config)
         require_map_identity(self.identity, report, "캡처 보고서")
         self.calibration_path = self.folder / "world/map_calibration.json"
+        if not self.calibration_path.is_file():
+            world = report.get("world_calibration") or {}
+            reason = world.get("error") or "서버의 --marker-layout 설정을 확인하고 웹에서 cm 보정을 생성하세요."
+            raise ValueError(f"주행용 cm 보정 파일이 없습니다. {reason}")
         self.calibration_bytes = self.calibration_path.read_bytes()
         inverse, self.paper_size = load_world_to_image(
             self.calibration_path, map_id=self.identity["map_id"], image_size=self.image_size.tolist(),
@@ -105,6 +147,13 @@ class CapturePose:
         if (np.abs(denominators) < 1e-9).any() or np.prod(denominators) <= 0:
             raise ValueError("마커 위치·방향을 월드 좌표로 투영할 수 없습니다.")
         center, forward = project_points(axis, transform)
+        if self.camera_position is not None:
+            # 렌즈 C, 바닥 투영 Q를 잇는 광선과 z=마커 높이 평면의 교점.
+            # Q가 전지 밖에 있어도 높이 보정 후 실제 마커는 전지 안일 수 있다.
+            camera_xy = self.camera_position[:2]
+            ratio = 1.0 - self.marker_height / self.camera_position[2]
+            center = camera_xy + ratio * (center - camera_xy)
+            forward = camera_xy + ratio * (forward - camera_xy)
         direction = forward - center
         length = np.linalg.norm(direction)
         if not np.isfinite(center).all() or not np.isfinite(length) or length < 1e-9:
@@ -121,7 +170,11 @@ class CapturePose:
             "x_cm": float(center[0]), "y_cm": float(center[1]),
             "heading_deg": degrees(atan2(direction[1], direction[0])) % 360,
             "captured_monotonic_s": captured,
-            "position_reference": "floor_projected_marker_with_offset",
+            "position_reference": ("height_corrected_marker_with_offset" if self.camera_position is not None
+                                   else "floor_projected_marker_with_offset"),
+            "height_correction_applied": self.camera_position is not None,
+            "marker_height_cm": self.marker_height if self.camera_position is not None else None,
+            "camera_position_cm": self.camera_position.tolist() if self.camera_position is not None else None,
         }
 
 
@@ -166,6 +219,13 @@ def main():
     parser.add_argument("--center-offset-cm", nargs=2, type=float, default=(-2.5, 0.0), metavar=("FORWARD", "RIGHT"),
                         help="마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리(cm), 기본 -2.5 0")
     parser.add_argument("--preview-only", action="store_true", help="cm 위치를 터미널에서만 확인")
+    camera = parser.add_mutually_exclusive_group()
+    camera.add_argument("--camera-position-cm", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                        help="전지 원점 기준 카메라 렌즈 중심의 실측 x·y·높이(cm), 카메라 이동 후 재측정")
+    camera.add_argument("--floor-projection-only", action="store_true",
+                        help="높이 미보정 바닥 투영 진단(--preview-only 필수)")
+    parser.add_argument("--marker-height-cm", type=float,
+                        help="전지 표면에서 마커 면 중심까지 수직 높이(cm), 저장값 또는 기본 10.5")
     args = parser.parse_args()
     try:
         url = urlsplit(args.server_url)
@@ -173,9 +233,29 @@ def main():
             raise ValueError("time.monotonic 시각을 공유하는 같은 노트북의 HTTP 서버 주소를 지정하세요.")
         if not 0 < args.pose_port <= 65535 or args.marker_id < 0:
             raise ValueError("유효한 UDP 포트와 0 이상 마커 ID를 지정하세요.")
-        converter = CapturePose(args.capture_dir, marker_id=args.marker_id, center_offset_cm=args.center_offset_cm)
+        if args.floor_projection_only and not args.preview_only:
+            raise ValueError("높이 미보정 진단은 --preview-only와 함께 사용하세요.")
+        position, height = args.camera_position_cm, args.marker_height_cm
+        settings = None
+        if position is None and not args.floor_projection_only:
+            settings = load_camera_position(args.capture_dir)
+            position = settings["camera_position_cm"]
+            if height is None:
+                height = settings["marker_height_cm"]
+        converter = CapturePose(args.capture_dir, marker_id=args.marker_id, center_offset_cm=args.center_offset_cm,
+                                camera_position_cm=position, marker_height_cm=10.5 if height is None else height)
+        if settings is not None and (
+                settings["capture_report_sha256"] != sha256(converter.report_bytes).hexdigest()
+                or settings["calibration_sha256"] != sha256(converter.calibration_bytes).hexdigest()):
+            raise ValueError("카메라 설정을 읽는 동안 지도·보정이 갱신됐습니다. 다시 실행하세요.")
+        if args.camera_position_cm is not None:
+            save_camera_position(converter)
         print(f"map={converter.identity['map_id']} unit=cm period={CONTROL_PERIOD_S}s UDP={args.pose_port}", flush=True)
-        print("시작 전 저장한 보정식을 재사용합니다. 위치는 상단 마커의 바닥 투영 근사이며 높이 오차가 남습니다.", flush=True)
+        if converter.camera_position is not None:
+            print(f"높이 보정 적용: camera_cm={converter.camera_position.tolist()} marker_height_cm={converter.marker_height:g}", flush=True)
+            print("카메라 실측 위치는 현재 보정 구도와 같아야 합니다. 렌즈 왜곡·마커 기울기 오차는 별도 확인하세요.", flush=True)
+        else:
+            print("높이 미보정 진단: 상단 마커의 바닥 투영 근사 좌표입니다.", flush=True)
         stream_pose(converter, args.server_url, pose_port=args.pose_port, preview_only=args.preview_only)
     except KeyboardInterrupt:
         return 130

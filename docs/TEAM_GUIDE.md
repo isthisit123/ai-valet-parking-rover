@@ -23,6 +23,10 @@
 
 ### HTTP 지도에서 웹 구역 자동 등록
 
+결과 게시의 Windows 디렉터리 잠금(5/32/33)은 최대 6회 재시도합니다. 지속 실패 시 이전 지도를 복원하며, 복원까지 실패하면 임시 빌드 폴더 외부의 `.previous-<고유값>`에 이전 결과를 보존하고 위치를 오류로 알립니다. 새 지도 게시 뒤 백업 정리만 실패한 경우 응답의 선택 필드 `cleanup_warning`과 서버 로그로 알립니다. 복원 실패 백업을 실행 산출물 정리 대상으로 자동 삭제하지 않습니다.
+
+실물 지도에서 OCR 힌트 수와 색상 주차칸 수가 다르면 공통 의미 지도 생성 단계가 같은 PNG의 어두운 영상 기준으로 주차칸만 한 번 재검출합니다. 기존 OCR 결과·ID·장애인석 유형·검은 시설 검출은 유지하고, 각 힌트가 동일 유형 영역 하나에 유일하게 매칭되는지 검사합니다. 성공한 의미 지도에는 선택 필드 `parking_detection_profile: low_light_retry`를 추가합니다. 실패 시 6개를 임의로 채우지 않으며 기존 게시 지도를 보존합니다.
+
 기본 OCR 지도 생성은 `semantic.json`의 주차칸에 `polygon_px: [[x,y], ...]`를 추가합니다. 기존 `bbox`, `center`, `area`, 시설·칸 ID와 도로 연결 계약은 유지합니다. 글자 내부 구멍을 제외한 색상 영역의 볼록 외곽을 단순화하며, 네 점 근사가 외곽 면적의 93% 이상을 보존할 때 사각형을 사용합니다. 그 외에는 외곽의 추가 꼭짓점을 유지합니다. cm 지도에서는 같은 점을 변환한 `polygon_cm`을 사용하고 `polygon_px`를 섞지 않습니다.
 
 `POST /api/map-capture`의 추가 응답 `parking_regions`와 고정 `parking_regions.json`은 `schema_version: "1.0"`, `capture_id`, 지도 식별자 3개, `source_sha256`, `camera_source`, `image_size_px`, `coordinate_frame: "capture_image"`, `unit: "pixel"`, 왼쪽 위 원점·오른쪽/아래 축, `regions`를 포함합니다. 구역은 `{id:"P1", parking_space_id:"space_1", type:"normal", points:[{x,y},...], occupied:null, occupancy_status:"unknown"}` 형식입니다. 외곽 내보내기 실패는 `parking_regions.status: "failed"`로 구분하고 지도·경로 결과는 보존합니다. 구버전 JSON 소비자는 새 필드를 무시할 수 있습니다.
@@ -94,6 +98,8 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 
 ## 경로와 로버 위치
 
+십자로 계산한 전지 외곽은 영상 가로·세로 각각 2%의 작은 이탈만 허용합니다. 보정 보고서의 선택 필드 `paper_bounds`에는 원래 `projected_corners_px`, `tolerance_px`, `slightly_outside`를 기록합니다. 실제 종이 경계 검출이나 잘린 부분의 복원을 뜻하지 않으며, 독립 확인점 검증·사진 해시 검사는 그대로 적용합니다. 큰 범위 이탈은 계산 좌표·영상 크기를 포함한 오류로 차단합니다.
+
 로버 실측 치수는 폭 15cm, 전체 길이 19cm입니다. 주행 제어 기준점은 좌우 구동 바퀴 축의 중간점이며 앞끝까지 9.5cm, 뒤끝까지 9.5cm입니다. 좌우 폭이 대칭이라고 가정하면 기준점에서 좌우 각각 7.5cm를 차지합니다. 마커 면 높이는 약 10.5cm이고 마커 중심은 기준점보다 앞쪽 2.5cm입니다. 이 치수는 통로·주차칸·회전 공간 검사의 입력 기준으로 기록하며, 현재 경로 추종의 차체 외곽 충돌 검사는 후속 구현 대상입니다.
 
 - 자동 보정에서는 빨간 십자 A~D의 실측 cm 좌표를 한 번 등록하고 같은 배치의 새 카메라 프레임에서 픽셀을 다시 검출합니다. 실물 주행에는 독립 확인점 E의 검증을 통과한 경로를 전달합니다. 기본 지도의 E는 A~D 안쪽에 있는 `space_5` 진입 도로와 EN–EX 도로의 교점입니다. 보정 보고서의 `validation`에는 교점의 시설 ID, 픽셀, 실측 cm, 변환한 cm, 오차가 기록됩니다. 캡처 PNG와 라벨 및 보정 보고서를 주행 경로와 함께 전달합니다. [자동 보정 실행 방법](../README.md#카메라에서-빨간-십자-자동-검출)
@@ -106,7 +112,9 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
 - `src.rover_control.pose_sender`는 주행 전에 검증·저장한 바닥 변환식을 읽고, ArUco API가 보내는 로버 마커의 원본 픽셀 위치·방향을 월드로 바꿉니다. 웹캠 원본과 지도 PNG의 같은 비율 크기 차이를 반영합니다. 같은 구도에서 십자가 가려져도 변환식을 재사용합니다. 위치 메시지에는 `map_image_sha256`과 `id_assignment_revision`도 포함하며 주행기가 경로와 대조합니다. `--preview-only`로 위치를 확인할 수 있습니다.
 - `drive --route`는 시작할 때 지정한 검증된 cm 경로를 읽습니다. 웹의 실시간 픽셀 경로·`route_revision`·점유 상태를 모터 주행으로 전달하는 소비자는 아직 없습니다. 후속 연결에서는 같은 캡처의 보정값과 지도 식별자를 검사하고, 마커 중심과 구동 바퀴 축 중간점의 차이 및 경로 교체·안내 중단 시 정지 처리를 맞춰야 합니다. 웹의 마커 중심·칸 내부 원 판정은 실제 주행기의 목표 2cm 이내 정지·새 위치 3개 안정 확인과 별도입니다.
-- 카메라 위치·높이를 수동 입력하지 않고 상단 마커의 바닥 투영 근사 좌표를 사용합니다. 주행 전 카메라 위치를 정해 보정하고 주행 중 구도를 유지합니다. 위치·줌·전지 배치가 달라지면 다시 보정합니다. 현재 마커 높이 실측은 약 10.5cm이며 높이 보정은 미적용입니다. `--center-offset-cm`은 마커에서 구동 바퀴 축 중간점까지 전방·오른쪽 거리이고 실행 기본값은 `[-2.5, 0]cm`입니다. 좌우 편차는 0으로 가정하며 실제 중심 위치와 대조합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 `lost`를 보냅니다. [실행·설정](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
+- 높이 보정에는 `--camera-position-cm X Y Z`로 전지 원점 기준 렌즈 중심의 실측 위치를 입력합니다. X·Y는 렌즈에서 수직으로 내린 점이며 카메라가 바라보는 화면 중심점과 다릅니다. Z는 전지 표면부터 렌즈까지 수직 높이로, 전지 밖 X·Y와 음수 좌표도 허용합니다. `--marker-height-cm` 기본 10.5cm보다 Z가 커야 합니다. 바닥 투영점 Q를 `C_xy + (1-h/C_z)*(Q_xy-C_xy)`로 높이 평면에 옮긴 뒤, `--center-offset-cm` 기본 `[-2.5, 0]cm`를 적용해 구동 바퀴 축 중간점을 계산합니다. 카메라 이동 후 위치를 다시 측정하고 지도를 재보정합니다. 구도 변경의 자동 감지는 없습니다. [측정·실행](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
+- 현재 렌즈 실측값 `[53, 151.7, 111.5]cm`와 마커 높이 10.5cm는 캡처별 `world/camera_position.json`에 저장합니다. 명시적 `--camera-position-cm` 입력은 검증 후 현재 캡처에 설정을 저장하고, 생략하면 저장값을 사용합니다. 캡처 보고서·보정 파일의 SHA-256이 달라지면 재입력을 요구합니다. 새 구도에 실측값을 자동 이식하지 않습니다.
+- 높이 보정된 UDP 위치는 기존 월드 cm 계약을 유지하고 `position_reference: height_corrected_marker_with_offset`, `height_correction_applied: true`, `marker_height_cm`, `camera_position_cm`을 추가합니다. 주행기의 기존 좌표·지도 식별자 소비는 유지합니다. 웹의 `/api/rover-pose`와 픽셀 도착 시험은 계속 상단 마커 픽셀 기준입니다. CLI의 높이 미보정 모드는 `--floor-projection-only --preview-only` 진단으로 제한하며 UDP를 전송하지 않습니다. 마커는 전지와 평행해야 하며 기울기·전방 부착 오차와 렌즈 왜곡은 별도로 확인합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 기존대로 `lost`를 보냅니다.
 
 ```json
 {"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}

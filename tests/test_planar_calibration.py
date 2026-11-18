@@ -97,3 +97,20 @@ class CameraMarkerCalibrationTest(unittest.TestCase):
     def test_rejects_wrong_marker_count(self):
         with self.assertRaisesRegex(ValueError, "검출: 0개"):
             calibrate_markers(np.zeros_like(self.image), self.layout, max_error_cm=1)
+
+    def test_small_projected_border_error_keeps_coordinates_and_independent_check(self):
+        height, width = self.image.shape[:2]
+        shift = np.float32([[1, 0, -85], [0, 1, 0]])
+        image = cv2.warpAffine(self.image, shift, (width, height))
+        points, report = calibrate_markers(image, self.layout, max_error_cm=0.5)
+        self.assertTrue(report['validation']['passed'])
+        self.assertTrue(report['paper_bounds']['slightly_outside'])
+        self.assertLess(min(p[0] for p in points['paper_corners_px']), 0)
+        wrong = deepcopy(self.layout)
+        wrong['markers_cm']['E'] = [65, 29]
+        _, rejected = calibrate_markers(image, wrong, max_error_cm=0.5)
+        self.assertFalse(rejected['validation']['passed'])
+        self.assertNotIn('image_to_world', rejected)
+        clipped = cv2.warpAffine(self.image, np.float32([[1, 0, -120], [0, 1, 0]]), (width, height))
+        with self.assertRaisesRegex(ValueError, '허용 여백'):
+            calibrate_markers(clipped, self.layout, max_error_cm=0.5)

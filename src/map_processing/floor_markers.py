@@ -9,6 +9,9 @@ from .planar_calibration import fit_floor_transform, project_points, quadrilater
 
 MARKER_RED_RANGES = (((0, 65, 65), (12, 255, 255)), ((168, 65, 65), (179, 255, 255)))
 CROSS_APPROXIMATION_FRACTIONS = (0.012, 0.018, 0.025, *np.linspace(0.012, 0.025, 27)[1:-1])
+# 실측·십자 검출 오차를 외곽까지 외삽할 때의 작은 이탈만 허용한다.
+# 보정점이나 외곽을 강제로 화면 안으로 옮기지 않으며 독립점 검증도 유지한다.
+PROJECTED_PAPER_BORDER_TOLERANCE_RATIO = 0.02
 
 
 def cross_center(contour):
@@ -107,8 +110,14 @@ def calibrate_markers(image, layout, *, max_error_cm):
     inverse = fit_floor_transform(world, outer, paper)
     matrix = np.linalg.inv(inverse)
     corners = project_points(paper, inverse)
-    if not np.isfinite(corners).all() or (corners < 0).any() or (corners >= [width, height]).any():
-        raise ValueError("계산한 전지 외곽이 화면을 벗어납니다. 전지 전체가 보이게 촬영하세요.")
+    tolerance = np.asarray([width, height]) * PROJECTED_PAPER_BORDER_TOLERANCE_RATIO
+    if (not np.isfinite(corners).all() or (corners < -tolerance).any()
+            or (corners > np.asarray([width - 1, height - 1]) + tolerance).any()):
+        raise ValueError("계산한 전지 외곽이 화면 허용 여백(가로·세로 2%)을 벗어납니다. "
+                         f"계산 모서리={corners.round(1).tolist()}, 영상={width}x{height}. "
+                         "현재 촬영과 A~D 실측 좌표·전지 크기를 함께 확인하세요.")
+    bounds = {"projected_corners_px": corners.tolist(), "tolerance_px": tolerance.tolist(),
+              "slightly_outside": bool((corners < 0).any() or (corners >= [width, height]).any())}
     if "E" in keys:
         index, = sorted(set(range(len(pixels))) - set(hull))
         point = pixels[index]
@@ -134,6 +143,7 @@ def calibrate_markers(image, layout, *, max_error_cm):
             "coordinate_frame": "world", "unit": "cm", "origin": WORLD_ORIGIN, "axis_directions": AXES,
         },
         "lens_distortion_corrected": False,
+        "paper_bounds": bounds,
         "validation": validation,
         ("image_to_world" if validation["passed"] else "candidate_image_to_world"): matrix.tolist(),
     }

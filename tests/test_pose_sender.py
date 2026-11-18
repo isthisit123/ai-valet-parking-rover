@@ -17,7 +17,7 @@ import numpy as np
 from src.map_processing.map_identity import AXES, WORLD_ORIGIN
 from src.map_processing.planar_calibration import project_points
 from src.rover_control.drive import PoseReceiver
-from src.rover_control.pose_sender import CapturePose, stream_pose
+from src.rover_control.pose_sender import CapturePose, load_camera_position, main, save_camera_position, stream_pose
 from src.rover_control.tracking import Follower, Route
 
 
@@ -78,6 +78,102 @@ class PoseSenderTest(unittest.TestCase):
         np.testing.assert_allclose([pose["x_cm"], pose["y_cm"]], [57, 42], atol=0.001)
         self.assertEqual(pose["position_reference"], "floor_projected_marker_with_offset")
 
+    def test_height_correction_recovers_projected_3d_marker_and_axle_position(self):
+        # 별도의 3D 핀홀 카메라로 영상을 합성해 높이·오프셋의 적용 순서를 검증한다.
+        intrinsic = np.array([[450., 0, 400], [0, 450., 300], [0, 0, 1]])
+        ground = np.float32([[0, 0, 0], [100, 0, 0], [100, 80, 0], [0, 80, 0]])
+        for camera in ([50., -70., 110.], [130., 40., 130.]):
+            camera = np.asarray(camera)
+            z = np.array([50., 40., 0.]) - camera
+            z /= np.linalg.norm(z)
+            x = np.cross(z, [0, 0, 1.])
+            x /= np.linalg.norm(x)
+            rotation = np.array([x, np.cross(z, x), z])
+            rvec, _ = cv2.Rodrigues(rotation)
+            tvec = -rotation @ camera
+
+            def pixels(points):
+                return cv2.projectPoints(np.asarray(points, dtype=float), rvec, tvec, intrinsic, None)[0].reshape(-1, 2)
+
+            self.matrix = cv2.getPerspectiveTransform(np.float32(pixels(ground) / 2), ground[:, :2].copy())
+            self.calibration['image_to_world'] = self.matrix.tolist()
+            self.calibration_path.write_text(json.dumps(self.calibration), encoding='utf-8')
+            for heading, axle in ((0, [33.7, 39.5]), (90, [70., 55.]), (215, [25., 25.])):
+                with self.subTest(camera=camera, heading=heading):
+                    angle = np.deg2rad(heading)
+                    forward = np.array([np.cos(angle), np.sin(angle), 0])
+                    right = np.array([-forward[1], forward[0], 0])
+                    center = np.array([*axle, 10.5]) + 2.5 * forward
+                    corners = [center - 2 * forward - 2 * right, center + 2 * forward - 2 * right,
+                               center + 2 * forward + 2 * right, center - 2 * forward + 2 * right]
+                    observation = self.observation()
+                    observation['rover']['corners_px'] = pixels(corners).tolist()
+                    corrected = CapturePose(self.folder, camera_position_cm=camera.tolist(),
+                                            center_offset_cm=(-2.5, 0)).convert(observation)
+                    np.testing.assert_allclose([corrected['x_cm'], corrected['y_cm']], axle, atol=0.001)
+                    self.assertLess(abs((corrected['heading_deg'] - heading + 180) % 360 - 180), 0.001)
+                    self.assertTrue(corrected['height_correction_applied'])
+                    self.assertEqual(corrected['marker_height_cm'], 10.5)
+                    self.assertEqual(corrected['position_reference'], 'height_corrected_marker_with_offset')
+                    raw = CapturePose(self.folder, center_offset_cm=(-2.5, 0)).convert(observation)
+                    self.assertGreater(np.linalg.norm(np.array([raw['x_cm'], raw['y_cm']]) - axle), 1)
+
+    def test_invalid_height_and_camera_measurements_are_rejected(self):
+        for camera, height in (([0, 0], 10.5), ([0, 0, 10.5], 10.5), ([0, 0, -1], 0),
+                               ([0, float('nan'), 100], 10.5), ([0, 0, 100], -1),
+                               ([0, 0, 100], float('inf'))):
+            with self.subTest(camera=camera, height=height), self.assertRaises(ValueError):
+                CapturePose(self.folder, camera_position_cm=camera, marker_height_cm=height)
+
+    def test_cli_requires_camera_or_explicit_preview_diagnostic(self):
+        with patch('sys.argv', ['pose_sender', '--capture-dir', str(self.folder), '--preview-only']), \
+                patch('sys.stderr', io.StringIO()) as error:
+            self.assertEqual(main(), 1)
+        self.assertIn('저장된 카메라 실측값이 없습니다', error.getvalue())
+        with patch('sys.argv', ['pose_sender', '--floor-projection-only']), patch('sys.stderr', io.StringIO()), \
+                patch('src.rover_control.pose_sender.CapturePose') as constructor:
+            self.assertEqual(main(), 1)
+            constructor.assert_not_called()
+        arguments = ['pose_sender', '--capture-dir', str(self.folder), '--preview-only',
+                     '--camera-position-cm', '50', '-70', '110']
+        with patch('sys.argv', arguments), patch('sys.stdout', io.StringIO()) as output, \
+                patch('src.rover_control.pose_sender.stream_pose') as stream:
+            self.assertEqual(main(), 0)
+            converter = stream.call_args.args[0]
+            np.testing.assert_array_equal(converter.camera_position, [50, -70, 110])
+            self.assertEqual(converter.marker_height, 10.5)
+            self.assertEqual(converter.offset, (-2.5, 0))
+            self.assertIn('높이 보정 적용', output.getvalue())
+
+    def test_saved_camera_measurements_are_reused_only_for_the_same_capture(self):
+        converter = CapturePose(self.folder, camera_position_cm=[53, 151.7, 111.5])
+        save_camera_position(converter)
+        self.assertEqual(load_camera_position(self.folder)['camera_position_cm'], [53, 151.7, 111.5])
+        path = self.folder / 'world/camera_position.json'
+        original_settings = path.read_bytes()
+        malformed = json.loads(original_settings)
+        malformed['camera_position_cm'] = None
+        path.write_text(json.dumps(malformed), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '실측'):
+            load_camera_position(self.folder)
+        path.write_bytes(original_settings)
+        with patch('sys.argv', ['pose_sender', '--capture-dir', str(self.folder), '--preview-only']), \
+                patch('sys.stdout', io.StringIO()), patch('src.rover_control.pose_sender.stream_pose') as stream:
+            self.assertEqual(main(), 0)
+            np.testing.assert_array_equal(stream.call_args.args[0].camera_position, [53, 151.7, 111.5])
+            self.assertEqual(stream.call_args.args[0].marker_height, 10.5)
+        original_report = (self.folder / 'report.json').read_bytes()
+        changed = {**self.report, 'camera_source': {**self.camera, 'session_id': 'new-camera'}}
+        (self.folder / 'report.json').write_text(json.dumps(changed), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '현재 지도·보정'):
+            load_camera_position(self.folder)
+        (self.folder / 'report.json').write_bytes(original_report)
+        changed_calibration = deepcopy(self.calibration)
+        changed_calibration['image_to_world'][0][2] += 1
+        self.calibration_path.write_text(json.dumps(changed_calibration), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '현재 지도·보정'):
+            load_camera_position(self.folder)
+
     def test_loss_staleness_session_mismatch_and_duplicate_frames(self):
         converter = CapturePose(self.folder)
         observation = self.observation(captured=100)
@@ -110,6 +206,18 @@ class PoseSenderTest(unittest.TestCase):
         self.calibration["validation"]["passed"] = False
         self.calibration_path.write_text(json.dumps(self.calibration), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "검증"):
+            CapturePose(self.folder)
+
+    def test_missing_calibration_explains_the_recorded_world_failure(self):
+        self.calibration_path.unlink()
+        report = {**self.report, 'world_calibration': {
+            'status': 'failed', 'error': '계산한 전지 외곽이 화면을 벗어납니다.'}}
+        (self.folder / 'report.json').write_text(json.dumps(report), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '전지 외곽이 화면을 벗어납니다'):
+            CapturePose(self.folder)
+        report.pop('world_calibration')
+        (self.folder / 'report.json').write_text(json.dumps(report), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '--marker-layout'):
             CapturePose(self.folder)
 
     def test_http_observation_reaches_drive_receiver_over_udp_and_stops_on_exit(self):

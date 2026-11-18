@@ -88,6 +88,34 @@ class GenerateMapTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "기준 사진"):
             load_route(path, require_verified=True)
 
+    def test_dim_parking_retries_same_image_and_never_publishes_missing_slots(self):
+        def dim_green(value):
+            hsv = cv2.cvtColor(load_map_image(self.config.image_path), cv2.COLOR_BGR2HSV)
+            green = (hsv[:, :, 0] >= 45) & (hsv[:, :, 0] <= 75) & (hsv[:, :, 1] >= 100)
+            hsv[green, 2] = value
+            ok, encoded = cv2.imencode('.png', cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
+            self.assertTrue(ok)
+            self.config.image_path.write_bytes(encoded.tobytes())
+            self.report['source_sha256'] = sha256(encoded.tobytes()).hexdigest()
+
+        dim_green(80)
+        with patch('scripts.generate_map.run_ocr', return_value=self.report) as ocr, redirect_stdout(io.StringIO()):
+            generate_map(self.config, Path(sys.executable), ocr_output_root=self.diagnostics)
+        ocr.assert_called_once()
+        semantic = json.loads(self.config.semantic_path.read_text(encoding='utf-8'))
+        parking = [r for r in semantic['regions'] if r.get('type') in ('normal', 'accessible')]
+        self.assertEqual({r['id'] for r in parking}, {f'space_{i}' for i in range(1, 7)})
+        self.assertEqual(sum(r['type'] == 'normal' for r in parking), 4)
+        self.assertEqual(semantic['parking_detection_profile'], 'low_light_retry')
+        saved = self.config.semantic_path.read_bytes()
+        saved_labels = self.config.label_path.read_bytes()
+        dim_green(30)
+        with patch('scripts.generate_map.run_ocr', return_value=self.report), redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(ValueError, '검출 수와 위치 힌트 수'):
+            generate_map(self.config, Path(sys.executable), replace=True, ocr_output_root=self.diagnostics)
+        self.assertEqual(self.config.semantic_path.read_bytes(), saved)
+        self.assertEqual(self.config.label_path.read_bytes(), saved_labels)
+
     def test_builds_new_map_from_png_without_existing_labels(self):
         self.assertFalse(self.config.label_path.exists())
         # 원본 사진은 출구가 배경에 닿으므로 사진에 대응하는 외곽 설정을 자동 적용한다.

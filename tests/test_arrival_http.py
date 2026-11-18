@@ -15,6 +15,8 @@ import numpy as np
 
 from scripts.http_map_server import handler_for
 from src.map_processing.map_config import DEFAULT_MAP
+from src.map_processing.map_identity import AXES, WORLD_ORIGIN
+from src.rover_control.pose_sender import CapturePose, load_camera_position, save_camera_position
 from test_live_parking import write_live_map
 from test_aruco_tracker import marker_image
 
@@ -24,6 +26,26 @@ class ArrivalHttpTest(unittest.TestCase):
         root = Path(self.enterContext(TemporaryDirectory()))
         maps = root / "maps"
         report = write_live_map(maps)
+        # 같은 HTTP 관측을 웹 도착 판정과 높이 보정 cm 변환에 함께 사용한다.
+        folder = maps / "latest"
+        report["status"] = "map_generated"
+        (folder / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        (folder / "labels.json").write_text(json.dumps({
+            "map_id": report["map_id"], "id_assignment_revision": report["id_assignment_revision"],
+            "image_sha256": report["map_image_sha256"],
+        }), encoding="utf-8")
+        (folder / "world").mkdir()
+        (folder / "world/map_calibration.json").write_text(json.dumps({
+            "map_id": report["map_id"], "validation": {"passed": True}, "paper_size_cm": [100, 80],
+            "source_frame": {"size_px": [400, 400], "sha256": report["map_image_sha256"]},
+            "target_frame": {"coordinate_frame": "world", "unit": "cm", "origin": WORLD_ORIGIN,
+                             "axis_directions": AXES},
+            "image_to_world": [[0.25, 0, 0], [0, 0.2, 0], [0, 0, 1]],
+        }), encoding="utf-8")
+        save_camera_position(CapturePose(folder, camera_position_cm=[50, 120, 110], marker_height_cm=10.5))
+        settings = load_camera_position(folder)
+        converter = CapturePose(folder, camera_position_cm=settings["camera_position_cm"],
+                                marker_height_cm=settings["marker_height_cm"])
         self.enterContext(patch('src.rover_control.live_parking.LiveParking.FREE_CONFIRM_SECONDS', 0))
         output = root / "arrival/latest.json"
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(
@@ -97,6 +119,14 @@ class ArrivalHttpTest(unittest.TestCase):
                            "X-Source-Width": "400", "X-Source-Height": "400", "X-Frame-Id": str(index)}
                 with urlopen(Request(url + "/api/aruco", encoded.tobytes(), headers)) as response:
                     result = json.load(response)["arrival_test"]
+                pose = converter.convert(get("/api/rover-pose"))
+                self.assertTrue(pose["height_correction_applied"])
+                self.assertEqual(pose["unit"], "cm")
+                self.assertEqual(pose["map_id"], report["map_id"])
+                # 합성 마커 중심의 바닥 투영과 렌즈에서 높이 평면으로 향하는 교점을 별도로 계산한다.
+                expected = np.array([50, 120]) + (1 - 10.5 / 110) * (np.array([319.5 / 4, 229.5 / 5]) - [50, 120])
+                np.testing.assert_allclose([pose["x_cm"], pose["y_cm"]], expected, atol=0.15)
+                self.assertLess(abs((pose["heading_deg"] + 180) % 360 - 180), 1)
                 if result["status"] == "success":
                     break
                 time.sleep(0.105)
@@ -104,6 +134,13 @@ class ArrivalHttpTest(unittest.TestCase):
             self.assertEqual(result["case_id"], case)
             self.assertEqual(json.loads(output.read_text())["status"], "success")
             self.assertEqual(get("/api/arrival-test")["status"], "success")
+            # 웹 성공 표시는 유지되더라도 마커가 사라진 관측을 주행 좌표로 재사용하지 않는다.
+            _, blank = cv2.imencode(".png", np.full_like(image, 255))
+            headers["X-Frame-Id"] = "lost-after-arrival"
+            with urlopen(Request(url + "/api/aruco", blank.tobytes(), headers)) as response:
+                json.load(response)
+            with self.assertRaisesRegex(ValueError, "미검출·중복·만료"):
+                converter.convert(get("/api/rover-pose"))
             with urlopen(Request(url + "/api/arrival-test/stop", b"{}", {"Content-Type": "application/json"})) as response:
                 self.assertEqual(json.load(response)["status"], "stopped")
             with urlopen(url + "/rover-arrival-bridge.js") as response:

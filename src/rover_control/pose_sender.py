@@ -22,6 +22,10 @@ from .drive import encode
 from .tracking import CONTROL_PERIOD_S, POSE_MAX_AGE_S, number
 
 
+class PoseUnavailable(ValueError):
+    """관측 미수신·미검출·만료로 현재 위치가 없는 상태. 구조·지도 오류와 구별한다."""
+
+
 def load_camera_position(folder):
     folder = Path(folder)
     path = folder / "world/camera_position.json"
@@ -99,6 +103,7 @@ class CapturePose:
         self.matrix = np.linalg.inv(inverse) @ np.diag([*(self.image_size / self.native_size), 1.0])
         self.last_capture = -1.0
         self.last_frame = None
+        self.last_timing_ms = {}
 
     def world_to_map(self, position_cm):
         """높이 보정된 월드 위치를 기준 지도 PNG의 픽셀로 되돌린다."""
@@ -120,9 +125,29 @@ class CapturePose:
         require_map_identity(self.identity, configured_map_identity(self.config), "현재 지도")
 
     def convert(self, observation, *, now=None):
+        self.last_timing_ms = {}
+        started = time.perf_counter()
+        try:
+            return self._convert(observation, now=now)
+        finally:
+            self.last_timing_ms['total_ms'] = (time.perf_counter() - started) * 1000
+
+    def _convert(self, observation, *, now=None):
         now = time.monotonic() if now is None else now
+        checked = time.perf_counter()
         self.require_current()
+        self.last_timing_ms['map_validation_ms'] = (time.perf_counter() - checked) * 1000
+        # 관측이 없어도 이미 알려진 카메라 변경을 시작 대기로 숨기지 않는다.
+        if 'camera_source' in observation and observation['camera_source'] != self.camera_source:
+            raise ValueError("보정 당시의 웹캠 세션·해상도와 다릅니다. 현재 카메라로 지도를 다시 생성하세요.")
         if observation.get("tracking_status") != "detected":
+            if 'width' in observation or 'height' in observation:
+                size = [number(observation.get(key)) for key in ('width', 'height')]
+                if size != self.native_size.tolist():
+                    raise ValueError("보정 당시의 웹캠 세션·해상도와 다릅니다. 현재 카메라로 지도를 다시 생성하세요.")
+            if (observation.get('tracking_status') in ('not_started', 'lost', 'stale')
+                    and observation.get('detection_status') != 'ambiguous'):
+                raise PoseUnavailable("ArUco 마커가 미검출·중복·만료 상태입니다.")
             raise ValueError("ArUco 마커가 미검출·중복·만료 상태입니다.")
         native_size = np.asarray([number(observation[key]) for key in ("width", "height")])
         if (observation.get("camera_source") != self.camera_source
@@ -132,13 +157,17 @@ class CapturePose:
                 observation.get("axis_directions")) != ("camera_image", "pixel", "top_left", AXES):
             raise ValueError("원본 카메라 픽셀 좌표의 ArUco 관측이 필요합니다.")
         captured = number(observation["received_monotonic_s"])
-        if not 0 <= now - captured <= POSE_MAX_AGE_S:
-            raise ValueError("ArUco 위치가 0.20초 안에 갱신되지 않았습니다.")
+        if captured > now:
+            raise ValueError("ArUco 관측 시각이 미래입니다.")
+        if now - captured > POSE_MAX_AGE_S:
+            raise PoseUnavailable("ArUco 위치가 0.20초 안에 갱신되지 않았습니다.")
         if observation.get("client_captured_at"):
             client_time = datetime.fromisoformat(observation["client_captured_at"].replace("Z", "+00:00"))
             age = (datetime.now(timezone.utc) - client_time).total_seconds()
-            if not -0.05 <= age <= POSE_MAX_AGE_S:
-                raise ValueError("웹캠 프레임의 촬영 시각이 오래됐습니다.")
+            if age < -0.05:
+                raise ValueError("웹캠 프레임의 촬영 시각이 미래입니다.")
+            if age > POSE_MAX_AGE_S:
+                raise PoseUnavailable("웹캠 프레임의 촬영 시각이 오래됐습니다.")
         rover = observation.get("rover") or {}
         if rover.get("id") != self.marker_id:
             raise ValueError("추적한 마커 ID가 설정과 다릅니다.")
@@ -147,6 +176,7 @@ class CapturePose:
         if captured <= self.last_capture or (frame is not None and frame == self.last_frame):
             return None
 
+        math_started = time.perf_counter()
         corners = np.asarray(rover["corners_px"], dtype=np.float32)
         if (corners.shape != (4, 2) or not np.isfinite(corners).all() or not cv2.isContourConvex(corners)
                 or abs(cv2.contourArea(corners)) < 1 or (corners < 0).any() or (corners >= native_size).any()):
@@ -178,6 +208,7 @@ class CapturePose:
         if (center < 0).any() or (center > self.paper_size).any():
             raise ValueError("변환한 로버 중심이 전지 범위를 벗어났습니다.")
         self.last_capture, self.last_frame = captured, frame
+        self.last_timing_ms['cm_math_ms'] = (time.perf_counter() - math_started) * 1000
         return {
             "type": "pose", **self.identity,
             "coordinate_frame": "world", "unit": "cm", "origin": WORLD_ORIGIN,

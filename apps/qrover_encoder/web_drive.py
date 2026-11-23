@@ -6,6 +6,7 @@ import argparse
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
+from http.client import RemoteDisconnected
 import json
 import math
 from pathlib import Path
@@ -13,17 +14,25 @@ import sys
 import threading
 import time
 from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import build_opener, ProxyHandler
 
 from node_follower import (CM_PER_PULSE, GOAL_CM, IDENTITY_KEYS, PathGuard, Rover, execute, follow,
-                           load_route, number, require_start_position, simplify_path, wait_settled)
+                           load_route, number, require_start_position, settled_pose, simplify_path, wait_settled)
 from vehicle_geometry import VehicleGeometry
 
 WEB_TTL_S = 0.20
+STARTUP_WAIT_S = 10.0
+STARTUP_HTTP_TIMEOUT_S = 0.50
+CONTROL_HTTP_TIMEOUT_S = 0.12
 
 
 class RouteChanged(RuntimeError):
     pass
+
+
+class WebTransportUnavailable(ConnectionError):
+    """응답 단절·소켓 타임아웃. 시작 대기에서만 재시도할 수 있는 통신 실패."""
 
 
 def route_key(state):
@@ -63,11 +72,20 @@ class WebFeed:
         self.opener = build_opener(ProxyHandler({}))
         self.lock, self.ready, self.done = threading.Lock(), threading.Event(), threading.Event()
         self.latest, self.error, self.last_pose = None, None, None
+        self.startup_complete, self.pending_generation = False, 0
+        self.pending_reason = '새 ArUco 관측 대기'
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def read(self, path):
-        with self.opener.open(self.url + path, timeout=0.12) as response:
-            body = response.read(2_000_001)
+        timeout = CONTROL_HTTP_TIMEOUT_S if self.startup_complete else STARTUP_HTTP_TIMEOUT_S
+        try:
+            with self.opener.open(self.url + path, timeout=timeout) as response:
+                body = response.read(2_000_001)
+        except HTTPError:
+            # 잘못된 API·지도 요청 등을 일시적인 관측 부족으로 숨기지 않는다.
+            raise
+        except (URLError, TimeoutError, ConnectionError, RemoteDisconnected) as error:
+            raise WebTransportUnavailable(f'{path} 응답 대기: {type(error).__name__}: {error}') from error
         if len(body) > 2_000_000:
             raise ValueError('웹 응답이 너무 큽니다.')
         result = json.loads(body)
@@ -77,14 +95,28 @@ class WebFeed:
 
     def _run(self):
         try:
+            from src.rover_control.pose_sender import PoseUnavailable
+
             while not self.done.is_set():
                 started = time.monotonic()
                 self.converter.require_current()
                 if self.settings_path.read_bytes() != self.settings_bytes:
                     raise ValueError('카메라 실측값이 변경됐습니다. 다시 실행하세요.')
-                observation = self.read('/api/rover-pose')
-                occupancy = self.read('/api/parking-occupancy')
-                pose = self.converter.convert(observation)
+                try:
+                    observation = self.read('/api/rover-pose')
+                    pose = self.converter.convert(observation)
+                    occupancy = self.read('/api/parking-occupancy')
+                except (PoseUnavailable, WebTransportUnavailable) as error:
+                    with self.lock:
+                        if self.startup_complete:
+                            raise
+                        # 시작 대기의 관측·통신 유실은 묶음을 초기화하며 과거 위치를 재사용하지 않는다.
+                        self.latest = self.last_pose = None
+                        self.pending_generation += 1
+                        self.pending_reason = str(error)
+                    self.ready.set()
+                    self.done.wait(max(0, 0.05 - (time.monotonic() - started)))
+                    continue
                 if pose is not None:
                     self.last_pose = pose
                 if self.last_pose is not None:
@@ -95,16 +127,50 @@ class WebFeed:
                     self.ready.set()
                 self.done.wait(max(0, 0.05 - (time.monotonic() - started)))
         except Exception as error:
-            # 통신·추적 실패를 자동 복구해 모터가 재출발하지 않게 한다.
+            # 구조·지도·통신 오류와 준비 완료 후 추적 유실은 계속 종료 상태로 유지한다.
             with self.lock:
                 self.error = error
             self.ready.set()
 
-    def start(self):
+    def start(self, timeout=STARTUP_WAIT_S):
+        timeout = number(timeout)
+        if timeout <= 0:
+            raise ValueError('출발 관측 대기 시간은 양수여야 합니다.')
+        deadline = time.monotonic() + timeout
         self.thread.start()
-        if not self.ready.wait(3):
-            raise TimeoutError('현재 웹 ArUco 관측을 3초 동안 받지 못했습니다.')
-        return self.current()
+        samples, last_capture, generation = [], -1, -1
+        reason = self.pending_reason
+        while time.monotonic() < deadline:
+            self.ready.wait(min(0.05, max(0, deadline - time.monotonic())))
+            self.ready.clear()
+            with self.lock:
+                observed_generation = self.pending_generation
+                reason = self.pending_reason
+            if generation != observed_generation:
+                samples, last_capture = [], -1
+                generation = observed_generation
+            try:
+                result = self.current()
+            except TimeoutError as error:
+                samples, last_capture = [], -1
+                reason = f'{reason} / {error}'
+                continue
+            pose = result['pose']
+            if pose['captured_monotonic_s'] <= last_capture:
+                continue
+            last_capture = pose['captured_monotonic_s']
+            samples = (samples + [pose])[-3:]
+            stable = settled_pose(samples) if len(samples) == 3 else None
+            if stable is not None:
+                with self.lock:
+                    if (self.error is not None or self.pending_generation != generation or self.latest is None
+                            or self.latest['pose']['captured_monotonic_s'] != last_capture):
+                        continue
+                    self.startup_complete = True
+                return {**result, 'pose': stable}
+            reason = '안정된 서로 다른 새 위치 관측 3개를 수집 중'
+        self.done.set()
+        raise TimeoutError(f'{timeout:g}초 안에 안정된 새 위치 3개를 받지 못했습니다. 마지막 상태: {reason}')
 
     def current(self):
         with self.lock:
@@ -131,7 +197,8 @@ class WebFeed:
 
     def close(self):
         self.done.set()
-        self.thread.join(timeout=0.5)
+        if self.thread.ident is not None:
+            self.thread.join(timeout=0.5)
 
 
 def make_plan(bundle, converter, semantic, final_heading=None):
@@ -294,6 +361,8 @@ def main():
     parser.add_argument('--repo', type=Path, default=default_repo())
     parser.add_argument('--server-url', default='http://127.0.0.1:8001')
     parser.add_argument('--capture-dir', type=Path)
+    parser.add_argument('--startup-wait-s', type=float, default=STARTUP_WAIT_S,
+                        help='모터 연결 전 안정된 새 위치 3개를 기다릴 최대 시간 (기본 10초)')
     parser.add_argument('--track-width-cm', type=float)
     parser.add_argument('--final-heading-deg', type=float, help='생략하면 진입 방향과 가까운 주차 가능한 방향')
     connection = parser.add_mutually_exclusive_group()
@@ -308,6 +377,8 @@ def main():
     width = 12 if args.track_width_cm is None else number(args.track_width_cm)
     if width <= 0:
         parser.error('--track-width-cm은 양수여야 합니다.')
+    if number(args.startup_wait_s) <= 0:
+        parser.error('--startup-wait-s는 유한한 양수여야 합니다.')
     repo = args.repo.resolve()
     if not (repo / 'src/rover_control/pose_sender.py').is_file():
         parser.error('--repo에 기존 웹 서버 저장소 경로를 지정하세요.')
@@ -327,7 +398,8 @@ def main():
         raise ValueError('의미 지도와 위치 보정이 다릅니다.')
     feed, rover = WebFeed(args.server_url, converter, folder / 'world/camera_position.json'), None
     try:
-        bundle = feed.start()
+        print(f'출발 전 관측 대기: 최대 {args.startup_wait_s:g}초, 안정된 새 위치 3개가 필요합니다.', flush=True)
+        bundle = feed.start(timeout=args.startup_wait_s)
         route, _ = make_plan(bundle, converter, semantic, args.final_heading_deg)
         p = wait_settled(feed, None, initial=True)
         require_start_position(p, route['waypoints'][0])

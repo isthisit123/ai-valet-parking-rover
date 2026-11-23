@@ -18,7 +18,7 @@ from src.map_processing.map_identity import AXES, WORLD_ORIGIN
 from src.map_processing.planar_calibration import project_points
 from src.rover_control.drive import PoseReceiver
 from src.rover_control.aruco_tracker import ArucoTracker
-from src.rover_control.pose_sender import CapturePose, load_camera_position, main, save_camera_position, stream_pose
+from src.rover_control.pose_sender import CapturePose, PoseUnavailable, load_camera_position, main, save_camera_position, stream_pose
 from src.rover_control.tracking import Follower, Route
 
 
@@ -64,7 +64,13 @@ class PoseSenderTest(unittest.TestCase):
                 "frame_id": "one", "front_offset_deg": 0, "rover": {"id": 7, "corners_px": corners_px.tolist()}}
 
     def test_scaled_perspective_position_and_world_heading(self):
-        pose = CapturePose(self.folder).convert(self.observation())
+        converter = CapturePose(self.folder)
+        pose = converter.convert(self.observation())
+        for field in ('map_validation_ms', 'cm_math_ms', 'total_ms'):
+            self.assertGreaterEqual(converter.last_timing_ms[field], 0)
+        with self.assertRaises(PoseUnavailable):
+            converter.convert({**self.observation(), 'tracking_status': 'lost'})
+        self.assertNotIn('cm_math_ms', converter.last_timing_ms)
         np.testing.assert_allclose([pose["x_cm"], pose["y_cm"]], [60, 40], atol=0.001)
         self.assertAlmostEqual(pose["heading_deg"], 30, places=3)
         self.assertEqual(pose["unit"], "cm")
@@ -219,6 +225,21 @@ class PoseSenderTest(unittest.TestCase):
                         {"camera_source": {**self.camera, "session_id": "other"}}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 converter.convert({**observation, **changes}, now=100)
+
+    def test_only_unavailable_observations_have_retryable_exception_type(self):
+        converter = CapturePose(self.folder)
+        observation = self.observation(captured=100)
+        for changes in ({'tracking_status': 'lost'}, {'tracking_status': 'stale'},
+                        {'tracking_status': 'not_started'}, {'received_monotonic_s': 99}):
+            with self.subTest(changes=changes), self.assertRaises(PoseUnavailable):
+                converter.convert({**observation, **changes}, now=100)
+        for changes in ({'tracking_status': 'ambiguous'},
+                        {'tracking_status': 'stale', 'detection_status': 'ambiguous'},
+                        {'tracking_status': 'lost', 'camera_source': {**self.camera, 'session_id': 'other'}},
+                        {'tracking_status': 'lost', 'width': 640}, {'received_monotonic_s': 101}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError) as raised:
+                converter.convert({**observation, **changes}, now=100)
+            self.assertNotIsInstance(raised.exception, PoseUnavailable)
 
     def test_saved_transform_keeps_working_when_floor_crosses_are_occluded(self):
         converter = CapturePose(self.folder)

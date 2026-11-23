@@ -38,6 +38,7 @@ MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_IMAGE_PIXELS = 8_000_000
 BRIDGE_PATH = Path(__file__).with_name("http_map_bridge.js")
 ARUCO_BRIDGE_PATH = Path(__file__).with_name("rover_aruco_bridge.js")
+ARUCO_FRAME_WORKER_PATH = Path(__file__).with_name("aruco_frame_worker.js")
 ARRIVAL_BRIDGE_PATH = Path(__file__).with_name("rover_arrival_bridge.js")
 OCCUPANCY_BRIDGE_PATH = Path(__file__).with_name("parking_occupancy_bridge.js")
 DETECTION_WORKER_PATH = Path(__file__).with_name("parking_detection_worker.js")
@@ -475,16 +476,17 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 marker_layout=None, max_error_cm=1.0,
                 map_id=DEFAULT_MAP.map_id, rover_marker_id=7, aruco_dictionary="DICT_4X4_50",
                 aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None,
-                occupancy_output_path=None):
+                occupancy_output_path=None, async_diagnostics=False):
     tracker = ArucoTracker(marker_id=rover_marker_id, dictionary=aruco_dictionary,
                            front_offset_deg=marker_front_offset_deg,
-                           output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json")
+                           output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json",
+                           async_persistence=async_diagnostics)
     aruco_busy = threading.Lock()
     aruco_frames = {"latest": None, "miss": None, "frozen": None}
     parking = LiveParking(output_root, map_lock=PUBLISH_LOCK,
                           output_path=occupancy_output_path or BASE_DIR / "data/rover_runs/occupancy/latest.json")
     arrival = ArrivalTest(output_root, marker_id=rover_marker_id, map_lock=PUBLISH_LOCK, parking=parking,
-                           output_path=arrival_output_path)
+                           output_path=arrival_output_path, async_persistence=async_diagnostics)
     base = SimpleHTTPRequestHandler
     if aruco_helper is not None and aruco_helper.is_file():
         # 기존 로컬 서버의 ArUco 기능을 그대로 사용한다.
@@ -495,6 +497,17 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
     busy = threading.Lock()
 
     class Handler(base):
+        @staticmethod
+        def flush_diagnostics(timeout=1.0):
+            results = [writer.flush(timeout) for writer in (tracker.writer, arrival.writer) if writer is not None]
+            return all(results)
+
+        @staticmethod
+        def close_diagnostics(timeout=1.0):
+            for writer in (tracker.writer, arrival.writer):
+                if writer is not None and not writer.close(timeout):
+                    print(f'진단 JSON 기록 종료 대기 시간을 초과했습니다: {writer.path}', flush=True)
+
         def __init__(self, *args, **kwargs):
             if base is SimpleHTTPRequestHandler:
                 kwargs["directory"] = str(web_root)
@@ -545,12 +558,19 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                     self.send_json(503, {"error": str(error)})
             elif path == "/js/ArUcoBridge.js":
                 self.send_bytes(200, ARUCO_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/aruco-frame-worker.js":
+                self.send_bytes(200, ARUCO_FRAME_WORKER_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/rover-arrival-bridge.js":
                 self.send_bytes(200, ARRIVAL_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/api/arrival-tests":
                 self.send_json(200, arrival.catalog())
             elif path == "/api/arrival-test":
-                self.send_json(200, arrival.current())
+                try:
+                    state = arrival.current()
+                except OSError as error:
+                    self.send_json(503, {"error": f"도착 상태 조회 실패: {error}"})
+                else:
+                    self.send_json(200, state)
             elif path == "/api/parking-occupancy":
                 try:
                     self.send_json(200, parking.current())
@@ -560,7 +580,12 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 self.send_json(200, {"marker_id": rover_marker_id, "dictionary": aruco_dictionary,
                                      "period_ms": aruco_period_ms, "front_offset_deg": marker_front_offset_deg})
             elif path == "/api/rover-pose":
-                self.send_json(200, {**tracker.current(), "arrival_test": arrival.current()})
+                try:
+                    result = {**tracker.current(), "arrival_test": arrival.current()}
+                except OSError as error:
+                    self.send_json(503, {"error": f"로버 위치·도착 상태 조회 실패: {error}"})
+                else:
+                    self.send_json(200, result)
             elif path == "/api/aruco-debug":
                 kind = "miss" if parse_qs(urlsplit(self.path).query).get("miss") == ["1"] else "latest"
                 frame = aruco_frames[kind]
@@ -643,6 +668,7 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                     self.send_json(400, {"error": str(error)})
                 return
             if urlsplit(self.path).path == "/api/aruco":
+                request_started = time.perf_counter()
                 if not aruco_busy.acquire(blocking=False):
                     self.send_json(409, {"error": "이전 마커 프레임 처리 중입니다."})
                     return
@@ -658,9 +684,21 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                     if len(body) != length:
                         raise ValueError("마커 프레임 수신이 완료되지 않았습니다.")
                     received = time.monotonic()
-                    result = tracker.observe(decode_tracking_image(body, content_type), received_monotonic_s=received,
+                    body_ms = (time.perf_counter() - request_started) * 1000
+                    decode_started = time.perf_counter()
+                    image = decode_tracking_image(body, content_type)
+                    decode_ms = (time.perf_counter() - decode_started) * 1000
+                    tracking_started = time.perf_counter()
+                    result = tracker.observe(image, received_monotonic_s=received,
                                              client_captured_at=self.headers.get("X-Captured-At"),
                                              frame_id=self.headers.get("X-Frame-Id"), camera_source=self.camera_source())
+                    tracker_ms = (time.perf_counter() - tracking_started) * 1000
+                    arrival_started = time.perf_counter()
+                    result["arrival_test"] = arrival.observe(result)
+                    result['server_timing_ms'] = {'request_body_ms': body_ms, 'decode_ms': decode_ms,
+                        'tracker_ms': tracker_ms, 'tracker_save_ms': result['tracking_timing_ms']['save_ms'],
+                        'arrival_ms': (time.perf_counter() - arrival_started) * 1000,
+                        'total_ms': (time.perf_counter() - request_started) * 1000}
                     previous = aruco_frames["latest"]
                     if previous and previous[2]["camera_source"] != result.get("camera_source"):
                         aruco_frames["miss"] = aruco_frames["frozen"] = None
@@ -668,10 +706,12 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                         "frame_id", "client_captured_at", "camera_source", "width", "height", "tracking_status",
                         "detection_status", "detection_method", "detection_attempts", "recent_detection",
                         "detection_attempt_details", "fallback_budget_exhausted",
-                        "processing_ms", "capture_age_ms", "rejected_candidate_count")})
+                        "processing_ms", "capture_age_ms", "rejected_candidate_count", "server_timing_ms",
+                        "tracking_timing_ms", "persistence", "persistence_warning")})
+                    aruco_frames['latest'][2]['arrival_timing_ms'] = result['arrival_test'].get('timing_ms')
+                    aruco_frames['latest'][2]['arrival_persistence'] = result['arrival_test'].get('persistence')
                     if result.get("detection_status") != "detected":
                         aruco_frames["miss"] = aruco_frames["latest"]
-                    result["arrival_test"] = arrival.observe(result)
                     self.send_json(200, result)
                 except (ValueError, OSError, cv2.error) as error:
                     self.send_json(400, {"error": str(error)})
@@ -766,7 +806,7 @@ def main():
                           marker_layout=marker_layout, max_error_cm=args.max_error_cm,
                           rover_marker_id=args.rover_marker_id, aruco_dictionary=args.aruco_dictionary,
                           aruco_period_ms=args.aruco_period_ms, marker_front_offset_deg=args.marker_front_offset_deg,
-                          arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json")
+                          arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json", async_diagnostics=True)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"ParkingHaeven + PNG map: http://localhost:{server.server_port}", flush=True)
     print(f"Vehicle ONNX: {model_path.resolve()}", flush=True)
@@ -778,6 +818,7 @@ def main():
         pass
     finally:
         server.server_close()
+        handler.close_diagnostics()
 
 
 if __name__ == "__main__":

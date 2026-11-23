@@ -113,8 +113,11 @@ export class MediaHandler {
             const maxWidth = this.canvas.parentElement.clientWidth;
             const scale = Math.min(maxWidth / this.videoElement.videoWidth, 1);
 
-            this.canvas.width = this.videoElement.videoWidth * scale;
-            this.canvas.height = this.videoElement.videoHeight * scale;
+            const width = Math.floor(this.videoElement.videoWidth * scale);
+            const height = Math.floor(this.videoElement.videoHeight * scale);
+            // 같은 크기 할당도 캔버스를 초기화하므로 해상도가 바뀔 때만 수행한다.
+            if (this.canvas.width !== width) this.canvas.width = width;
+            if (this.canvas.height !== height) this.canvas.height = height;
 
             this.ctx.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
         }

@@ -154,6 +154,12 @@ $model = ".\web\parkinghaeven\models\parking_cars.onnx"
 
 배선·모터 보정·정지 조건은 [UNO Q 수신 앱](../apps/q_rover_receiver/README.md)을 참고합니다. 실주행은 실측 보정과 위치·정지 시험 후 출발점 근처의 짧은 직선부터 진행합니다.
 
+### 위치 진단 파일과 실시간 API
+
+CLI HTTP 서버의 ArUco·도착 `latest.json`은 비동기 진단 사본입니다. 실시간 소비자는 기존 `/api/rover-pose`·`/api/arrival-test`를 사용합니다. 기록 중인 상태 외에 최신 대기 한 개만 보관하고 중간 기록을 합치며, 관측 시각·지도 ID·현재 위치를 기록 완료 시각에 맞춰 갱신하지 않습니다. 파일을 직접 읽는 도구도 원래 촬영·수신 시각과 200ms TTL을 검사해야 합니다. 추적 파일·도착 파일의 기록 순서가 서로 일치한다는 계약은 없으므로 두 사본을 같은 프레임으로 가정하지 않습니다.
+
+추가 선택 필드 `persistence`, `arrival_test.persistence`의 `mode: async_latest`, `pending`, `writing`, `submitted_version`, `written_version`, `coalesced`, `last_write_ms`, `last_error`는 기록 진단입니다. 저장 오류는 `persistence_warning`에도 제공하고 이전 파일을 보존합니다. 기록 버전·완료 시간은 위치 최신성이나 주행 허가로 사용하지 않습니다. 기존 위치·도착 필드와 안전정지는 유지합니다. `tracking_timing_ms.save_ms`·`arrival_test.timing_ms.save_ms`는 응답 경로가 기다린 기록 등록 시간이며 실제 백그라운드 파일 시간은 `last_write_ms`로 구분합니다. 프로그램에서 `handler_for()`를 직접 조합하는 경우 동기 기록이 기본이고 `async_diagnostics=True`를 선택한 호출자가 종료 시 `close_diagnostics()`를 호출합니다.
+
 ## Git 작업
 
 담당 기능 브랜치는 최신 `main`에서 분기하고, 기능별로 테스트한 뒤 PR을 올립니다. 팀원에게는 변경 목적, 실행 명령·결과, 영향받는 데이터 규칙, 남은 실물 확인을 전달합니다. 모델·카메라 원본·실행 로그·`archives/`는 로컬에서 관리합니다.

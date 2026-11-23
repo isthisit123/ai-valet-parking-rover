@@ -14,6 +14,8 @@
 
 ## 담당과 전달물
 
+웹 소스와 차량 모델은 저장소의 `web/parkinghaeven/`을 기본으로 사용합니다. `models/parking_cars.onnx`는 단일 car 클래스 모델이며 실제 파일을 Git에 포함합니다. COCO 80클래스 `yolov8n.onnx`로 대체하지 않습니다. 모델 해시·출력 `[1,5,8400]` 규약은 `web/parkinghaeven/models/manifest.json`에 있습니다. 모델이 없으면 HTTP 서버 시작 시 명확히 실패하며, 외부 웹 폴더만 모델이 없는 경우에는 포함된 모델을 제공합니다.
+
 | 담당 | 다음 작업 | 전달물 |
 | --- | --- | --- |
 | 맵 제작팀 | HTTP OCR 자동 생성은 연결됨. 실제 카메라 구도로 시설·주차칸과 점유 검증. 새 지도에서 기준점 4개 실측. | 기준 PNG·라벨·의미 지도, 카메라 ROI와 빈 기준 사진, 최신 점유 JSON, 검증된 cm 경로 |
@@ -81,7 +83,7 @@ HTTP 지도 생성은 `scripts.http_map_server`가 수신 PNG에서 OCR 힌트�
 
 ```powershell
 $python = ".\.venv\Scripts\python.exe"
-$model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Source\models\parking_cars.onnx'
+$model = ".\web\parkinghaeven\models\parking_cars.onnx"
 & $python -m src.parking_detection.onnx_occupancy --model $model --camera 1 --save-frame archives/occupancy_setup/empty.png --output archives/occupancy_setup/initial.json
 & $python -m src.parking_detection.configure_regions --image archives/occupancy_setup/empty.png --output archives/occupancy_setup/regions.json --verified-empty-reference
 & $python -m src.parking_detection.onnx_occupancy --model $model --camera 1 --regions archives/occupancy_setup/regions.json --empty-reference archives/occupancy_setup/empty.png --output archives/occupancy_setup/current.json
@@ -132,7 +134,7 @@ $model = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Sour
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
 - 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
 - `src.rover_control.pose_sender`는 주행 전에 검증·저장한 바닥 변환식을 읽고, ArUco API가 보내는 로버 마커의 원본 픽셀 위치·방향을 월드로 바꿉니다. 웹캠 원본과 지도 PNG의 같은 비율 크기 차이를 반영합니다. 같은 구도에서 십자가 가려져도 변환식을 재사용합니다. 위치 메시지에는 `map_image_sha256`과 `id_assignment_revision`도 포함하며 주행기가 경로와 대조합니다. `--preview-only`로 위치를 확인할 수 있습니다.
-- `drive --route`는 시작할 때 지정한 검증된 cm 경로를 읽습니다. 웹의 실시간 픽셀 경로·`route_revision`·점유 상태를 모터 주행으로 전달하는 소비자는 아직 없습니다. 후속 연결에서는 같은 캡처의 보정값과 지도 식별자를 검사하고, 마커 중심과 구동 바퀴 축 중간점의 차이 및 경로 교체·안내 중단 시 정지 처리를 맞춰야 합니다. 웹의 마커 중심·칸 내부 원 판정은 실제 주행기의 목표 2cm 이내 정지·새 위치 3개 안정 확인과 별도입니다.
+- 기존 `drive --route`는 시작 시 지정한 정적 cm 경로를 읽습니다. 별도 엔코더 소비자 `apps/qrover_encoder/web_drive.py`는 웹의 `/api/rover-pose`·`arrival_test`와 `/api/parking-occupancy`를 읽고, 같은 캡처의 바닥 변환식으로 픽셀 경로를 cm로 바꿉니다. 위치에는 기존 높이 보정을 적용합니다. 같은 테스트의 경로 버전 증가에는 제동·새 위치 3개·차체 공간 검사 후 경로를 교체하고, 새 테스트/지도/조건·점유 만료·안내 중단·마커 유실에는 종료합니다. 기본 실행은 사전 검사이며 `--drive`가 필요합니다. 웹 픽셀 원 도착과 모터 목표 2cm·최종 방향·차체의 칸 내부 판정은 별도입니다. [실행](../apps/qrover_encoder/README_KO.md)
 - 높이 보정에는 `--camera-position-cm X Y Z`로 전지 원점 기준 렌즈 중심의 실측 위치를 입력합니다. X·Y는 렌즈에서 수직으로 내린 점이며 카메라가 바라보는 화면 중심점과 다릅니다. Z는 전지 표면부터 렌즈까지 수직 높이로, 전지 밖 X·Y와 음수 좌표도 허용합니다. `--marker-height-cm` 기본 10.5cm보다 Z가 커야 합니다. 바닥 투영점 Q를 `C_xy + (1-h/C_z)*(Q_xy-C_xy)`로 높이 평면에 옮긴 뒤, `--center-offset-cm` 기본 `[0, 0]cm`를 적용해 구동 바퀴 축 중간점을 계산합니다. 카메라 이동 후 위치를 다시 측정하고 지도를 재보정합니다. 구도 변경의 자동 감지는 없습니다. [측정·실행](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
 - 현재 렌즈 실측값 `[53, 151.7, 111.5]cm`와 마커 높이 10.5cm는 캡처별 `world/camera_position.json`에 저장합니다. 명시적 `--camera-position-cm` 입력은 검증 후 현재 캡처에 설정을 저장하고, 생략하면 저장값을 사용합니다. 캡처 보고서·보정 파일의 SHA-256이 달라지면 재입력을 요구합니다. 새 구도에 실측값을 자동 이식하지 않습니다.
 - 높이 보정된 UDP 위치는 기존 월드 cm 계약을 유지하고 `position_reference: height_corrected_marker_with_offset`, `height_correction_applied: true`, `marker_height_cm`, `camera_position_cm`을 추가합니다. 주행기의 기존 좌표·지도 식별자 소비는 유지합니다. 웹의 `/api/rover-pose`는 상단 마커의 원본 카메라 픽셀을 제공하고, 도착 시험은 저장된 카메라 실측값이 있을 때 높이 보정 결과를 지도 픽셀로 역투영합니다. CLI의 높이 미보정 모드는 `--floor-projection-only --preview-only` 진단으로 제한하며 UDP를 전송하지 않습니다. 마커는 전지와 평행해야 하며 기울기·전방 부착 오차와 렌즈 왜곡은 별도로 확인합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 기존대로 `lost`를 보냅니다.

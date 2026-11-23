@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Q-ROVER 주행 재생</title>
+<style>
+  :root { color-scheme: light; font-family: system-ui, sans-serif; color: #17262b; background: #edf1ee; }
+  body { max-width: 920px; margin: 0 auto; padding: 24px clamp(12px, 4vw, 36px); }
+  h1 { margin: 0 0 10px; font-size: clamp(24px, 5vw, 38px); }
+  p { margin: 0 0 16px; line-height: 1.55; }
+  canvas { width: 100%; height: auto; display: block; border: 1px solid #c4d2ca; border-radius: 12px; }
+  section { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 14px 0; }
+  button, select { font: inherit; border: 1px solid #657c70; border-radius: 6px; padding: 7px 12px; }
+  button { background: #1e5645; color: white; cursor: pointer; }
+  input { flex: 1; min-width: 130px; accent-color: #1e5645; }
+  output { font-variant-numeric: tabular-nums; min-width: 8ch; }
+</style>
+<main>
+  <h1>Q-ROVER 주행 재생</h1>
+  <p>3개 노드를 방문한 뒤 0° 방향으로 주차합니다. 점선은 계획 경로, 초록색 선은 가상 주행 궤적입니다. 격자 간격은 10cm입니다.</p>
+  <canvas width="900" height="620" aria-label="가상 주차장 노드와 로버 궤적"></canvas>
+  <section aria-label="재생 설정">
+    <label>윤거 <select id="width"><option value="15">15cm</option><option value="12">12cm</option></select></label>
+    <button id="play" type="button">재생</button>
+    <label for="time">시간</label><input id="time" type="range" min="0" value="0" aria-label="재생 시간">
+    <output for="time"></output>
+  </section>
+  <p>차체는 1차시 PDF 8쪽 사진을 참고한 약 19 × 15cm 모형입니다.</p>
+</main>
+<script src="replay_data.js"></script>
+<script>
+  const canvas = document.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  const width = document.querySelector("#width");
+  const play = document.querySelector("#play");
+  const slider = document.querySelector("#time");
+  const time = document.querySelector("output");
+  const scale = 9;
+  let trace, playing = false, frame, startedAt;
+
+  function line(points, color, weight, dash = []) {
+    ctx.beginPath();
+    ctx.setLineDash(dash);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = weight;
+    points.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  function chassis(x, y, heading) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(heading * Math.PI / 180);
+    const box = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
+    box(-9.5, -5.7, 19, 11.4, "#a7b6be");
+    for (const side of [-1, 1]) {
+      const center = side * Number(width.value) / 2;
+      box(-3.25, center - 1.15, 6.5, 2.3, "#15262c");
+      box(-1.3, center - 0.6, 2.6, 1.2, "#d5b951");
+    }
+    box(-7.4, -3.8, 11, 4.4, "#edf1f3");
+    box(-0.8, 1.3, 7.8, 3.3, "#395663");
+    box(6, -4.7, 2.2, 9.4, "#263b44");
+    line([[1, 0], [13, 0], [10.5, -1.8], [13, 0], [10.5, 1.8]], "#0c6045", 0.45);
+    ctx.restore();
+  }
+
+  function draw(index) {
+    ctx.setTransform(scale, 0, 0, scale, 0, -8 * scale);
+    ctx.fillStyle = "#f8faf8";
+    ctx.fillRect(0, 8, 100, 70);
+    for (let x = 0; x <= 100; x += 10) line([[x, 8], [x, 78]], "#dce6dd", 0.13);
+    for (let y = 10; y <= 77; y += 10) line([[0, y], [100, y]], "#dce6dd", 0.13);
+    line([[trace[0][1], trace[0][2]], ...replayData.nodes], "#7b8c86", 0.28, [0.9, 0.65]);
+    line(trace.slice(0, index + 1).map(([, x, y]) => [x, y]), "#27a078", 0.48);
+    ctx.font = "bold 1.6px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    replayData.nodes.forEach(([x, y], i) => {
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.strokeStyle = "#466856";
+      ctx.lineWidth = 0.25;
+      ctx.stroke();
+      ctx.fillStyle = "#173c2c";
+      ctx.fillText(i + 1, x, y);
+    });
+    const [seconds, x, y, heading] = trace[index];
+    chassis(x, y, heading);
+    time.value = seconds.toFixed(1) + "초";
+    slider.value = index;
+  }
+
+  function stop() {
+    playing = false;
+    cancelAnimationFrame(frame);
+    play.textContent = "재생";
+  }
+
+  function animate(now) {
+    let index = Number(slider.value);
+    while (index < trace.length - 1 && trace[index + 1][0] <= (now - startedAt) / 500) index++;
+    draw(index);
+    if (index === trace.length - 1) stop();
+    else if (playing) frame = requestAnimationFrame(animate);
+  }
+
+  function reset() {
+    stop();
+    trace = replayData.traces[width.value];
+    slider.max = trace.length - 1;
+    draw(0);
+  }
+
+  play.addEventListener("click", () => {
+    if (playing) { stop(); return; }
+    if (Number(slider.value) === trace.length - 1) draw(0);
+    startedAt = performance.now() - trace[Number(slider.value)][0] * 500;
+    playing = true;
+    play.textContent = "일시정지";
+    frame = requestAnimationFrame(animate);
+  });
+  width.addEventListener("change", reset);
+  slider.addEventListener("input", () => { stop(); draw(Number(slider.value)); });
+  reset();
+</script>
+</html>

@@ -1,0 +1,8 @@
+{
+  "map_id": "REPLACE_WITH_CURRENT_MAP_ID",
+  "coordinate_frame": "world",
+  "unit": "cm",
+  "origin": "paper_top_left",
+  "nodes": [[40.0, 30.0], [70.0, 30.0], [70.0, 60.0]],
+  "final_heading_deg": 90.0
+}

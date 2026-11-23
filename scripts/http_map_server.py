@@ -43,7 +43,16 @@ OCCUPANCY_BRIDGE_PATH = Path(__file__).with_name("parking_occupancy_bridge.js")
 DETECTION_WORKER_PATH = Path(__file__).with_name("parking_detection_worker.js")
 DETECTOR_PROXY_PATH = Path(__file__).with_name("parking_detector_proxy.js")
 PARKING_REGIONS_BRIDGE_PATH = Path(__file__).with_name("parking_regions_bridge.js")
+BUNDLED_WEB_ROOT = BASE_DIR / "web/parkinghaeven"
 PUBLISH_LOCK = threading.RLock()
+
+
+def vehicle_model_path(web_root):
+    """외부 웹 폴더에 모델이 없으면 저장소에 포함한 실제 차량 모델을 제공한다."""
+    for path in (Path(web_root) / "models/parking_cars.onnx", BUNDLED_WEB_ROOT / "models/parking_cars.onnx"):
+        if path.is_file():
+            return path
+    raise FileNotFoundError("parking_cars.onnx가 없습니다. ONNX 모델을 포함한 브랜치를 다시 받으세요.")
 
 
 def rename_for_publish(source, target):
@@ -529,6 +538,11 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 self.send_bytes(200, DETECTOR_PROXY_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/rover-original-yolo.js":
                 self.send_bytes(200, (web_root / "js/YOLODetector.js").read_bytes(), "text/javascript; charset=utf-8")
+            elif path == "/models/parking_cars.onnx":
+                try:
+                    self.send_bytes(200, vehicle_model_path(web_root).read_bytes(), "application/octet-stream")
+                except OSError as error:
+                    self.send_json(503, {"error": str(error)})
             elif path == "/js/ArUcoBridge.js":
                 self.send_bytes(200, ARUCO_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/rover-arrival-bridge.js":
@@ -703,7 +717,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--web-root", type=Path, default=BASE_DIR.parent / "ParkingHaeven/Source")
+    parser.add_argument("--web-root", type=Path, default=BUNDLED_WEB_ROOT,
+                        help="기본값: 저장소에 포함한 web/parkinghaeven")
     parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "data/http_map_captures")
     parser.add_argument("--labels", type=Path, default=DEFAULT_MAP.label_path)
     parser.add_argument("--mapping", type=Path, default=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json")
@@ -739,7 +754,11 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.error(str(error))
     if not (args.web_root / "index.html").is_file():
-        parser.error("--web-root에 ParkingHaeven/Source 경로를 지정하세요.")
+        parser.error("web/parkinghaeven/index.html 또는 --web-root의 index.html이 필요합니다.")
+    try:
+        model_path = vehicle_model_path(args.web_root)
+    except OSError as error:
+        parser.error(str(error))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     handler = handler_for(args.web_root.resolve(), args.output_dir.resolve(), args.labels, args.mapping, args.aruco_helper,
                           ocr_python=args.ocr_python.resolve(), min_score=args.min_score, legacy_hints=args.legacy_hints,
@@ -750,6 +769,7 @@ def main():
                           arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"ParkingHaeven + PNG map: http://localhost:{server.server_port}", flush=True)
+    print(f"Vehicle ONNX: {model_path.resolve()}", flush=True)
     print(f"Captures: {args.output_dir.resolve()}", flush=True)
     print("Generation: " + ("legacy hints (fixed camera pose)" if args.legacy_hints else f"OCR ({args.ocr_python})"), flush=True)
     try:

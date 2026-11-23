@@ -1,0 +1,445 @@
+{
+  "straight": {
+    "timed": {
+      "12": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 33.921,
+        "median_abs_heading_deg_at_100cm": 31.229
+      },
+      "15": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 26.11,
+        "median_abs_heading_deg_at_100cm": 24.603
+      }
+    },
+    "encoder_no_p": {
+      "12": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 3.952,
+        "median_abs_heading_deg_at_100cm": 2.153
+      },
+      "15": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 3.101,
+        "median_abs_heading_deg_at_100cm": 1.646
+      }
+    },
+    "encoder_p": {
+      "12": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 2.586,
+        "median_abs_heading_deg_at_100cm": 1.023
+      },
+      "15": {
+        "runs": 25,
+        "median_abs_drift_at_100cm": 2.085,
+        "median_abs_heading_deg_at_100cm": 0.819
+      }
+    }
+  },
+  "rotation": {
+    "low_pwm_exact_pose_12cm": {
+      "runs": 150,
+      "reached": 150,
+      "true_error_within_5deg": 150,
+      "max_true_error_deg": 4.679,
+      "max_direction_reversals": 2,
+      "failures": []
+    },
+    "low_pwm_exact_pose_15cm": {
+      "runs": 150,
+      "reached": 150,
+      "true_error_within_5deg": 150,
+      "max_true_error_deg": 4.521,
+      "max_direction_reversals": 1,
+      "failures": []
+    },
+    "regular_pwm_noisy_pose_12cm": {
+      "runs": 150,
+      "reached": 120,
+      "true_error_within_5deg": 120,
+      "max_true_error_deg": 4.945,
+      "max_direction_reversals": 37,
+      "failures": [
+        {
+          "target_deg": 45,
+          "phase": [
+            0.62,
+            0.42
+          ]
+        },
+        {
+          "target_deg": 45,
+          "phase": [
+            0.62,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 45,
+          "phase": [
+            0.62,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 45,
+          "phase": [
+            0.82,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 45,
+          "phase": [
+            0.82,
+            0.82
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.22,
+            0.62
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.22,
+            0.82
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.42,
+            0.62
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.42,
+            0.82
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.62,
+            0.42
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.62,
+            0.62
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.62,
+            0.82
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.82,
+            0.02
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.82,
+            0.22
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.82,
+            0.42
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.82,
+            0.62
+          ]
+        },
+        {
+          "target_deg": -90,
+          "phase": [
+            0.82,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.02,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.22,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.42,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.42,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.62,
+            0.42
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.62,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.62,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.82,
+            0.22
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.82,
+            0.42
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.82,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.82,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 175,
+          "phase": [
+            0.62,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 175,
+          "phase": [
+            0.82,
+            0.82
+          ]
+        }
+      ]
+    },
+    "regular_pwm_noisy_pose_15cm": {
+      "runs": 150,
+      "reached": 133,
+      "true_error_within_5deg": 133,
+      "max_true_error_deg": 4.539,
+      "max_direction_reversals": 39,
+      "failures": [
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.02,
+            0.22
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.22,
+            0.42
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.22,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.22,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.42,
+            0.82
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.62,
+            0.22
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.62,
+            0.62
+          ]
+        },
+        {
+          "target_deg": 15.6,
+          "phase": [
+            0.82,
+            0.42
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.02,
+            0.22
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.02,
+            0.42
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.22,
+            0.42
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.22,
+            0.62
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.42,
+            0.02
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.42,
+            0.22
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.62,
+            0.22
+          ]
+        },
+        {
+          "target_deg": -15.6,
+          "phase": [
+            0.82,
+            0.22
+          ]
+        },
+        {
+          "target_deg": 90,
+          "phase": [
+            0.22,
+            0.02
+          ]
+        }
+      ]
+    },
+    "low_pwm_noisy_pose_12cm": {
+      "runs": 150,
+      "reached": 150,
+      "true_error_within_5deg": 150,
+      "max_true_error_deg": 4.578,
+      "max_direction_reversals": 12,
+      "failures": []
+    },
+    "low_pwm_noisy_pose_15cm": {
+      "runs": 150,
+      "reached": 150,
+      "true_error_within_5deg": 150,
+      "max_true_error_deg": 4.521,
+      "max_direction_reversals": 2,
+      "failures": []
+    }
+  },
+  "routes": {
+    "12": {
+      "runs": 25,
+      "completed": 25,
+      "within_position_and_angle": 25,
+      "max_node_error_cm": 1.575,
+      "max_final_angle_error_deg": 4.349,
+      "failures": []
+    },
+    "15": {
+      "runs": 25,
+      "completed": 25,
+      "within_position_and_angle": 25,
+      "max_node_error_cm": 1.764,
+      "max_final_angle_error_deg": 4.168,
+      "failures": []
+    }
+  },
+  "simulated_fault_injection": {
+    "MCU -4 (ToF obstacle)": true,
+    "MCU -5 (ToF stale)": true,
+    "MCU -3 (heartbeat expired)": true,
+    "ArUco lost": true
+  }
+}

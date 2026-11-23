@@ -1,0 +1,2 @@
+# 차량 모델은 Git LFS 포인터가 아닌 실제 바이너리로 함께 배포한다.
+web/parkinghaeven/models/*.onnx binary

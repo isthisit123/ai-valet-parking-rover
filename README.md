@@ -1,6 +1,18 @@
 # Q-ROVER — AI Valet Parking Rover
 
-지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. 현재 **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**, 검증된 cm 경로 생성과 **ArUco 픽셀 → 월드 cm 위치·방향 → 주행기 UDP 입력**을 구현했습니다. 실시간 점유는 웹의 픽셀 경로·도착 시험에 연결되어 있습니다. 실시간 경로 변경의 모터 주행 연결과 실물 주행 검증은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
+지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 점유·선택 경로·위치를 직접 받아 UNO Q에 연결하며, 경로 변경 시 제동·재검사를 수행합니다. 자동·모의 시험을 통과했고 실제 보드·카메라·모터 주행 검증은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
+
+## 다른 PC에서 받기
+
+이 브랜치는 웹 실행에 필요한 `web/parkinghaeven/`과 실제 차량 모델 `web/parkinghaeven/models/parking_cars.onnx`를 포함합니다. 모델은 약 12.7MB의 일반 Git 바이너리이며 Git LFS 설치나 별도 모델 다운로드가 필요하지 않습니다. SHA-256과 입출력 규약은 [모델 정보](web/parkinghaeven/models/manifest.json)에 기록했습니다. 별도 `ParkingHaeven` 폴더 없이 아래 설치 절차 후 저장소 루트에서 실행합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+[localhost:8001](http://localhost:8001)에서 차량 모델 로드 완료를 확인합니다. 브라우저의 ONNX Runtime Web 1.22.0과 Tailwind는 기존 CDN을 사용하므로 인터넷 연결이 필요합니다. `--web-root`로 별도 웹을 지정해도 해당 폴더에 `parking_cars.onnx`가 없으면 포함된 모델을 제공합니다. 개인별 최신 캡처·카메라 보정은 새 PC에서 다시 생성해야 합니다.
+
+엔코더 연결의 기본 명령은 `python apps/qrover_encoder/web_drive.py`이며 모터 없이 사전 검사합니다. 실물 설정과 USB/Wi-Fi 실행은 [엔코더 실행 안내](apps/qrover_encoder/README_KO.md)를 따르세요.
 
 ## 기본 지도
 
@@ -73,7 +85,7 @@ $python = ".\.venv\Scripts\python.exe"
 ## 웹에서 PNG 전송
 
 ```powershell
-$webRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Source'
+$webRoot = ".\web\parkinghaeven"
 & $python -m scripts.http_map_server --web-root $webRoot --port 8001
 ```
 

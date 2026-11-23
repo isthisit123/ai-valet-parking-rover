@@ -20,6 +20,9 @@ Thumbs.db
 # 로컬 보관 자료
 /archives/
 
+# 엔코더 수신 앱 ZIP 재생성 전 로컬 백업
+/apps/qrover_encoder/backups/
+
 # HTTP로 받은 원본 카메라 사진과 회차별 맵 결과
 /data/http_map_captures/
 /data/ocr_building_tests/

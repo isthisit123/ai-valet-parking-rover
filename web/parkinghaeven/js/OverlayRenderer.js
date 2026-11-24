@@ -162,7 +162,8 @@ export class OverlayRenderer {
 
         // Fill based on occupancy status
         if (this.mode === 'monitor') {
-            this.ctx.fillStyle = region.occupied ? 'rgba(239, 68, 68, 0.5)' : 'rgba(34, 197, 94, 0.5)';
+            this.ctx.fillStyle = region.occupied === null ? 'rgba(100, 116, 139, 0.5)'
+                : region.occupied ? 'rgba(239, 68, 68, 0.5)' : 'rgba(34, 197, 94, 0.5)';
             this.ctx.fill();
         } else {
             this.ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
@@ -171,7 +172,7 @@ export class OverlayRenderer {
 
         // Stroke
         const strokeColor = this.mode === 'monitor'
-            ? (region.occupied ? '#ef4444' : '#22c55e')
+            ? (region.occupied === null ? '#64748b' : region.occupied ? '#ef4444' : '#22c55e')
             : (isSelected ? '#fbbf24' : '#3b82f6');
         this.ctx.strokeStyle = strokeColor;
         this.ctx.lineWidth = isSelected ? 3 : 2;

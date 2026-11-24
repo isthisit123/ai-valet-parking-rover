@@ -27,6 +27,7 @@ from src.map_processing.semantic_mapper import detect_regions, map_semantics, ma
 from src.map_processing.path_visualizer import export_routes
 from scripts.generate_map import default_ocr_python, generate_map as generate_ocr_map
 from scripts.parking_regions import export_parking_regions
+from scripts.server_camera import ServerCamera, encode_image
 from src.rover_control.aruco_tracker import ArucoTracker
 from src.rover_control.arrival_test import ArrivalTest
 from src.rover_control.live_parking import LiveParking
@@ -476,7 +477,7 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 marker_layout=None, max_error_cm=1.0,
                 map_id=DEFAULT_MAP.map_id, rover_marker_id=7, aruco_dictionary="DICT_4X4_50",
                 aruco_period_ms=100, marker_front_offset_deg=0.0, aruco_output_path=None, arrival_output_path=None,
-                occupancy_output_path=None, async_diagnostics=False):
+                occupancy_output_path=None, async_diagnostics=False, camera_index=None):
     tracker = ArucoTracker(marker_id=rover_marker_id, dictionary=aruco_dictionary,
                            front_offset_deg=marker_front_offset_deg,
                            output_path=aruco_output_path or BASE_DIR / "data/rover_runs/aruco/latest.json",
@@ -495,6 +496,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
         spec.loader.exec_module(module)
         base = module.handler_for(web_root)
     busy = threading.Lock()
+    camera = None if camera_index is None else ServerCamera(
+        camera_index, vehicle_model_path(web_root), tracker, arrival, parking, aruco_period_ms / 1000)
 
     class Handler(base):
         @staticmethod
@@ -504,6 +507,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
 
         @staticmethod
         def close_diagnostics(timeout=1.0):
+            if camera is not None:
+                camera.close()
             for writer in (tracker.writer, arrival.writer):
                 if writer is not None and not writer.close(timeout):
                     print(f'진단 JSON 기록 종료 대기 시간을 초과했습니다: {writer.path}', flush=True)
@@ -532,8 +537,13 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
 
         def do_GET(self):
             path = unquote(urlsplit(self.path).path)
+            if camera is not None and not self.local_camera_request():
+                self.send_error(403)
+                return
             if path in ("/", "/index.html"):
                 html = (web_root / "index.html").read_text(encoding="utf-8")
+                if camera is not None:
+                    html = html.replace("</head>", f"<script>window.roverCameraIndex={camera.index}</script></head>")
                 html = html.replace("</body>", '<script src="/parking-regions-bridge.js"></script>'
                                     '<script src="/rover-map-bridge.js"></script>'
                                     '<script src="/parking-occupancy-bridge.js"></script>'
@@ -562,6 +572,17 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 self.send_bytes(200, ARUCO_FRAME_WORKER_PATH.read_bytes(), "text/javascript; charset=utf-8")
             elif path == "/rover-arrival-bridge.js":
                 self.send_bytes(200, ARRIVAL_BRIDGE_PATH.read_bytes(), "text/javascript; charset=utf-8")
+            elif camera is not None and path == "/api/camera/preview.jpg":
+                try:
+                    frame = camera.latest()
+                    session = parse_qs(urlsplit(self.path).query).get("session")
+                    if session and session != [frame.source["session_id"]]:
+                        raise ValueError("카메라가 다시 열렸습니다. 현재 세션에 연결하세요.")
+                    self.send_bytes(200, encode_image(frame.image, ".jpg"), "image/jpeg")
+                except (ValueError, cv2.error) as error:
+                    self.send_json(503, {"error": str(error)})
+            elif camera is not None and path == "/api/camera/detections":
+                self.send_json(200, camera.results())
             elif path == "/api/arrival-tests":
                 self.send_json(200, arrival.catalog())
             elif path == "/api/arrival-test":
@@ -589,6 +610,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
             elif path == "/api/aruco-debug":
                 kind = "miss" if parse_qs(urlsplit(self.path).query).get("miss") == ["1"] else "latest"
                 frame = aruco_frames[kind]
+                if camera is not None and camera.frame is not None:
+                    frame = camera.diagnostic(kind == "miss")
                 if frame is None:
                     self.send_json(404, {"error": "카메라의 마커 프레임을 먼저 받으세요."})
                     return
@@ -605,6 +628,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 else:
                     kind = "miss" if parse_qs(urlsplit(self.path).query).get("miss") == ["1"] else "latest"
                     frame = aruco_frames[kind]
+                    if camera is not None and camera.frame is not None:
+                        frame = camera.diagnostic(kind == "miss")
                 if frame is None:
                     self.send_json(404, {"error": "진단 프레임이 없습니다. 진단 정보를 다시 조회하세요."})
                     return
@@ -621,8 +646,58 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
             else:
                 super().do_GET()
 
+        def local_camera_request(self):
+            # 브라우저 카메라 권한 대신 명시적인 로컬 페이지에서만 장치 접근을 허용한다.
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin")
+            expected = {f"{name}:{self.server.server_port}" for name in ("localhost", "127.0.0.1", "[::1]")}
+            if self.server.server_port == 80:
+                expected.update(("localhost", "127.0.0.1", "[::1]"))
+            return (host.lower() in expected and origin in (None, "http://" + host)
+                    and self.headers.get("Sec-Fetch-Site") != "cross-site")
+
         def do_POST(self):
             path = urlsplit(self.path).path
+            if camera is not None and not self.local_camera_request():
+                self.send_error(403)
+                return
+            if camera is not None and path in ("/api/camera/start", "/api/camera/monitor", "/api/camera/stop"):
+                try:
+                    if self.headers.get_content_type() != "application/json":
+                        raise ValueError("JSON 요청이 필요합니다.")
+                    length = int(self.headers.get("Content-Length", 0))
+                    if not 0 < length <= 16384:
+                        raise ValueError("잘못된 카메라 설정 크기")
+                    self.connection.settimeout(2)
+                    data = json.loads(self.rfile.read(length))
+                    if not isinstance(data, dict):
+                        raise ValueError("카메라 설정은 JSON 객체여야 합니다.")
+                    if path.endswith("/start"):
+                        self.send_json(200, camera.start())
+                        return
+                    with camera.lifecycle:
+                        camera.require_session(data.get("session_id"))
+                        if path.endswith("/stop"):
+                            arrival.stop("camera_stopped")
+                            camera.close()
+                        elif data.get("enabled") is True:
+                            if busy.locked():
+                                raise ValueError("맵 생성 후 감시 모드를 시작하세요.")
+                            with PUBLISH_LOCK:
+                                report = read_json(output_root / "latest/report.json")
+                            camera.configure(data, report)
+                        else:
+                            camera.disable()
+                            arrival.stop("monitor_stopped")
+                    self.send_json(200, {"ok": True})
+                except (KeyError, ValueError, TypeError, OSError, cv2.error) as error:
+                    self.send_json(400, {"error": str(error)})
+                return
+            if camera is not None and (path == "/api/parking-occupancy" or
+                    path == "/api/aruco" and (self.headers.get("X-Source-Type") != "video" or
+                                              camera.frame is not None)):
+                self.send_json(409, {"error": "Python 카메라 모드에서는 서버가 관측을 생성합니다."})
+                return
             if path == "/api/parking-occupancy":
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -718,7 +793,8 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 finally:
                     aruco_busy.release()
                 return
-            if urlsplit(self.path).path != "/api/map-capture":
+            native_capture = path == "/api/camera/map-capture" and camera is not None
+            if path != "/api/map-capture" and not native_capture:
                 if base is not SimpleHTTPRequestHandler:
                     super().do_POST()
                 else:
@@ -728,22 +804,32 @@ def handler_for(web_root, output_root, labels_path, mapping_path, aruco_helper=N
                 self.send_json(409, {"error": "이전 지도 생성이 진행 중입니다."})
                 return
             try:
-                if self.headers.get_content_type() != "image/png":
-                    raise ValueError("Content-Type은 image/png여야 합니다.")
-                length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= MAX_UPLOAD_BYTES:
-                    raise ValueError("PNG 크기는 1~12MiB 범위여야 합니다.")
-                self.connection.settimeout(20)
-                body = self.rfile.read(length)
-                if len(body) != length:
-                    raise ValueError("PNG 전송이 완료되지 않았습니다.")
+                source, captured_at = self.camera_source(), self.headers.get("X-Captured-At")
+                if native_capture:
+                    frame = camera.latest()
+                    if source != frame.source:
+                        raise ValueError("현재 카메라 세션과 일치하지 않습니다.")
+                    body, captured_at = encode_image(frame.image, ".png"), frame.captured_at
+                else:
+                    if self.headers.get_content_type() != "image/png" or (
+                            camera is not None and source["kind"] == "webcam"):
+                        raise ValueError("현재 모드의 PNG 캡처를 사용하세요.")
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= MAX_UPLOAD_BYTES:
+                        raise ValueError("PNG 크기는 1~12MiB 범위여야 합니다.")
+                    self.connection.settimeout(20)
+                    body = self.rfile.read(length)
+                    if len(body) != length:
+                        raise ValueError("PNG 전송이 완료되지 않았습니다.")
                 camera_header = self.headers.get("X-Rover-Camera-Position")
                 measurement = None if camera_header is None else validate_camera_measurement(json.loads(camera_header))
                 arrival.stop("map_regeneration")
+                if camera is not None:
+                    camera.disable()
                 report = generate_map(body, output_root, labels_path=labels_path, mapping_path=mapping_path,
-                                      captured_at=self.headers.get("X-Captured-At"), ocr_python=ocr_python,
+                                      captured_at=captured_at, ocr_python=ocr_python,
                                       min_score=min_score, legacy_hints=legacy_hints,
-                                      preparation_path=preparation_path, map_id=map_id, camera_source=self.camera_source(),
+                                      preparation_path=preparation_path, map_id=map_id, camera_source=source,
                                       marker_layout=marker_layout, max_error_cm=max_error_cm,
                                       camera_measurement=measurement)
                 self.send_json(200 if report["status"] == "map_generated" else 422, report)
@@ -764,6 +850,9 @@ def main():
     parser.add_argument("--mapping", type=Path, default=BASE_DIR / "assets/maps/parking_map_real_parkinghaeven_mapping.json")
     parser.add_argument("--aruco-helper", type=Path, default=BASE_DIR.parent / "parking_training_kit/aruco_server.py")
     parser.add_argument("--port", type=int, default=8001)
+    camera_options = parser.add_mutually_exclusive_group()
+    camera_options.add_argument("--camera-index", type=int, help="Python 웹캠 장치 번호 (내장 웹 기본 0)")
+    camera_options.add_argument("--browser-camera", action="store_true", help="기존 브라우저 카메라 입력 사용")
     parser.add_argument("--ocr-python", type=Path, default=default_ocr_python(), help="OCR 전용 환경의 Python")
     parser.add_argument("--min-score", type=float, default=0.75)
     parser.add_argument("--map-id", default=DEFAULT_MAP.map_id)
@@ -777,6 +866,11 @@ def main():
     parser.add_argument("--marker-front-offset-deg", type=float, default=0.0,
                         help="마커 오른쪽 축에서 로버 전방까지의 보정각 (시계 방향 +)")
     args = parser.parse_args()
+    if args.camera_index is not None and args.camera_index < 0:
+        parser.error("--camera-index는 0 이상의 장치 번호여야 합니다.")
+    use_camera = not args.browser_camera and args.web_root.resolve() == BUNDLED_WEB_ROOT.resolve()
+    if args.camera_index is not None and not use_camera:
+        parser.error("Python 웹캠 모드는 저장소에 포함한 ParkingHaeven 웹을 사용하세요.")
     if not math.isfinite(args.min_score) or not 0 <= args.min_score <= 1:
         parser.error("--min-score는 0~1 범위여야 합니다.")
     if not 50 <= args.aruco_period_ms <= 1000 or not math.isfinite(args.marker_front_offset_deg):
@@ -806,7 +900,8 @@ def main():
                           marker_layout=marker_layout, max_error_cm=args.max_error_cm,
                           rover_marker_id=args.rover_marker_id, aruco_dictionary=args.aruco_dictionary,
                           aruco_period_ms=args.aruco_period_ms, marker_front_offset_deg=args.marker_front_offset_deg,
-                          arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json", async_diagnostics=True)
+                          arrival_output_path=BASE_DIR / "data/rover_runs/arrival/latest.json", async_diagnostics=True,
+                          camera_index=(args.camera_index or 0) if use_camera else None)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"ParkingHaeven + PNG map: http://localhost:{server.server_port}", flush=True)
     print(f"Vehicle ONNX: {model_path.resolve()}", flush=True)

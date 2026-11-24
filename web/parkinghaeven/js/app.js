@@ -22,6 +22,7 @@ class ParkingApp {
 
         this.detectInterval = null;
         this.isDetecting = false;
+        this.displayGeneration = 0;
         this.lastDetectionCount = 0;
         this.detectionDebugCounter = 0;
 
@@ -36,7 +37,7 @@ class ParkingApp {
         this.setupEventListeners();
         this.setupCanvasResizing();
         this.enumerateWebcams();
-        this.initModel();
+        if (!Number.isInteger(window.roverCameraIndex)) this.initModel();
     }
 
     async initModel() {
@@ -99,6 +100,11 @@ class ParkingApp {
     }
 
     async enumerateWebcams() {
+        if (Number.isInteger(window.roverCameraIndex)) {
+            const select = document.getElementById('webcam-select');
+            select.replaceChildren(new Option('Python 카메라 ' + window.roverCameraIndex, String(window.roverCameraIndex)));
+            return;
+        }
         try {
             const devices = await navigator.mediaDevices.enumerateDevices();
             const videoDevices = devices.filter(device => device.kind === 'videoinput');
@@ -266,11 +272,24 @@ class ParkingApp {
     async startWebcam() {
         const select = document.getElementById('webcam-select');
         const deviceId = select.value || null;
-
+        const button = document.getElementById('webcam-start-btn');
+        if (button.disabled) return;
+        if (this.mediaHandler.serverCamera) {
+            this.stopWebcam();
+            this.updateCanvasStatus('Python 카메라 중지');
+            return;
+        }
+        button.disabled = true;
         this.log('웹캠 시작 중...');
         const result = await this.mediaHandler.initWebcam(deviceId);
+        button.disabled = false;
+        if (this.currentSourceType !== 'webcam') {
+            this.stopWebcam();
+            return;
+        }
 
         if (result.success) {
+            if (this.mediaHandler.serverCamera) button.textContent = '카메라 중지';
             this.webcamStream = result.stream;
             this.currentSourceId = 'LIVE_WEBCAM';
             document.getElementById('source-id').textContent = this.currentSourceId;
@@ -290,13 +309,23 @@ class ParkingApp {
     }
 
     stopWebcam() {
+        if (this.mediaHandler.serverCamera) {
+            this.overlayRenderer.setDetectionResults([]);
+            this.overlayRenderer.setRegions(this.overlayRenderer.getRegions().map(r => ({...r, occupied:null, occupancy_status:'unknown'})));
+            this.updateStats();
+            this.mainCanvas.getContext('2d').clearRect(0, 0, this.mainCanvas.width, this.mainCanvas.height);
+            document.getElementById('webcam-start-btn').textContent = '카메라 시작';
+        }
         this.mediaHandler.stop();
         this.webcamStream = null;
         this.stopDetection();
     }
 
     loadRegionsForSource() {
-        const regions = StorageManager.loadRegions(this.currentSourceId);
+        let regions = StorageManager.loadRegions(this.currentSourceId);
+        if (this.mediaHandler.serverCamera) {
+            regions = regions.map(r => ({...r, occupied: null, occupancy_status: 'unknown'}));
+        }
         this.overlayRenderer.setRegions(regions);
         this.log(`${regions.length}개 주차 구역 로드됨`);
         this.updateStats();
@@ -367,6 +396,23 @@ class ParkingApp {
         if (this.isDetecting) return;
 
         this.isDetecting = true;
+        if (this.mediaHandler.serverCamera) {
+            const source = this.mediaHandler.serverCamera;
+            const regions = this.overlayRenderer.getRegions();
+            const generation = this.displayGeneration;
+            this.mediaHandler.cameraCommand('monitor', {enabled: true, session_id: source.session_id,
+                capture_id: regions[0]?.capture_id, regions, canvas_size: [this.mainCanvas.width, this.mainCanvas.height]})
+                .then(() => this.refreshCameraDetections(source, generation))
+                .catch(error => {
+                    this.log('감시 시작 실패: ' + error.message, 'error');
+                    if (this.mediaHandler.serverCamera === source && generation === this.displayGeneration) this.setMode('setup');
+                });
+            return;
+        }
+        if (Number.isInteger(window.roverCameraIndex) && this.currentSourceType === 'webcam') {
+            this.isDetecting = false;
+            return;
+        }
         this.log('감지 시작...');
 
         this.detectInterval = setInterval(() => {
@@ -375,6 +421,11 @@ class ParkingApp {
     }
 
     stopDetection() {
+        if (this.isDetecting && this.mediaHandler.serverCamera) {
+            this.mediaHandler.cameraCommand('monitor', {enabled: false, session_id: this.mediaHandler.serverCamera.session_id})
+                .catch(error => this.log('감시 중단 실패: ' + error.message, 'error'));
+        }
+        this.displayGeneration++;
         this.isDetecting = false;
         if (this.detectInterval) {
             clearInterval(this.detectInterval);
@@ -383,10 +434,12 @@ class ParkingApp {
     }
 
     async detectAndRender() {
+        const generation = this.displayGeneration;
         const frameData = this.mediaHandler.getCurrentFrameData();
         const { width, height } = this.mediaHandler.getCanvasSize();
 
         const detections = await this.detector.detect(frameData, width, height);
+        if (this.displayGeneration !== generation || !this.isDetecting) return;
         this.overlayRenderer.setDetectionResults(detections);
 
         // Debug logging
@@ -419,6 +472,30 @@ class ParkingApp {
 
         this.overlayRenderer.setRegions(regionsWithOccupancy);
         this.updateStats();
+    }
+
+    async refreshCameraDetections(source, generation = this.displayGeneration) {
+        const active = () => this.isDetecting && this.mediaHandler.serverCamera === source && generation === this.displayGeneration;
+        if (!active()) return;
+        let result;
+        try {
+            const response = await fetch('/api/camera/detections', {cache:'no-store', signal:AbortSignal.timeout(2000)});
+            if (!response.ok) throw new Error('차량 검출 상태를 읽지 못했습니다.');
+            result = await response.json();
+        } catch (error) {result = {states:{}, boxes:[], error:error.message};}
+        if (!active()) return;
+        const sx = this.mainCanvas.width / source.width, sy = this.mainCanvas.height / source.height;
+        const regions = this.overlayRenderer.getRegions().map(region => {
+            const state = (result.capture_id === region.capture_id && result.states[region.parking_space_id]) || 'unknown';
+            return {...region, occupied: state === 'unknown' ? null : state === 'occupied', occupancy_status: state};
+        });
+        const boxes = result.boxes.map(({bbox_xywh_px: [x,y,w,h], confidence}) => ({
+            bbox: {x:x*sx, y:y*sy, width:w*sx, height:h*sy}, center: {x:(x+w/2)*sx, y:(y+h/2)*sy}, label:'car', confidence}));
+        this.overlayRenderer.setDetectionResults(boxes);
+        this.overlayRenderer.setRegions(regions);
+        this.updateStats();
+        this.updateCanvasStatus(result.error || 'Python 카메라 · 감시 중');
+        setTimeout(() => this.refreshCameraDetections(source, generation), 350);
     }
 
     handleCanvasClick(e) {
@@ -535,7 +612,7 @@ class ParkingApp {
         const regions = this.overlayRenderer.getRegions();
         const total = regions.length;
         const occupied = regions.filter(r => r.occupied).length;
-        const free = total - occupied;
+        const free = this.mediaHandler.serverCamera ? regions.filter(r => r.occupied === false).length : total - occupied;
 
         document.getElementById('total-spaces').textContent = total;
         document.getElementById('occupied-spaces').textContent = occupied;

@@ -37,6 +37,8 @@ App Lab에서 기존 앱을 정지하고 갱신된 `q_rover_encoder_receiver.zip
 
 ### 2. 기존 웹 서버 실행
 
+내장 웹에서는 Python이 카메라와 차량·ArUco 분석을 담당합니다. 카메라 번호는 서버의 `--camera-index`로 선택합니다(기본 0). 브라우저를 최소화해도 아래 주행기가 읽는 API는 Python 관측으로 갱신됩니다. [새 카메라 실행 순서](../../README.md#python-웹캠으로-백그라운드-감시)
+
 첫 번째 PowerShell 창에서 실행합니다. 이미 실행 중이면 기존 서버를 Ctrl+C로 종료한 뒤 다시 실행합니다.
 
 ```powershell

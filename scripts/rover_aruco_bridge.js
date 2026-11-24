@@ -141,6 +141,20 @@ export class ArUcoBridge {
         const sample = {schedule_ms: Math.max(0, started - (this.scheduledFor ?? started))};
         try {
             await this.ready;
+            if (this.media.serverCamera) {
+                const source = this.media.serverCamera;
+                const response = await fetch('/api/rover-pose', {cache: 'no-store', signal: AbortSignal.timeout(1000)});
+                if (!response.ok) throw new Error('Python 카메라 위치 조회 실패');
+                const data = await response.json();
+                if (source !== this.media.serverCamera || data.camera_source?.session_id !== source.session_id) return;
+                this.lastResult = data;
+                this.panel.textContent = 'Python 카메라 · ArUco ' + data.tracking_status
+                    + (data.rover ? ' · (' + data.rover.center_px.map(v => v.toFixed(1)).join(', ') + ') px · '
+                        + data.rover.heading_deg.toFixed(1) + '°' : ' · 현재 위치 없음')
+                    + ' · 프레임 ' + data.frame_id + ' · 검출 ' + data.processing_ms.toFixed(1) + 'ms';
+                window.dispatchEvent(new CustomEvent('aruco-result', {detail: data}));
+                return;
+            }
             const video = this.media.videoElement;
             if (this.media.currentSourceType === 'image' || !video || video.readyState < 2 || !video.videoWidth || video.paused) {
                 this.lastResult = null;

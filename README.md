@@ -2,6 +2,25 @@
 
 지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 점유·선택 경로·위치를 직접 받아 UNO Q에 연결하며, 경로 변경 시 제동·재검사를 수행합니다. 자동·모의 시험을 통과했고 실제 보드·카메라·모터 주행 검증은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
 
+## Python 웹캠으로 백그라운드 감시
+
+내장 ParkingHaeven 웹의 기본 카메라 입력은 Python입니다. 아래 명령으로 서버를 켜고 웹에서 **카메라 시작**을 누르면 OpenCV가 장치를 한 번 엽니다. 기본 장치 번호는 0이며 외장 카메라가 1번이면 숫자를 바꾸세요.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --camera-index 0 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+1. [ParkingHaeven](http://localhost:8001)을 Ctrl+F5로 열고 **카메라 시작**을 누릅니다. 빈 전지를 촬영하고 현재 렌즈 좌표를 입력한 뒤 **현재 화면 PNG 전송 · 맵 생성**을 누릅니다. Python이 최신 원본 프레임을 PNG로 만들어 기존 OCR·경로·cm 보정 흐름에 전달합니다.
+2. 여섯 칸의 경계를 확인하고 필요하면 수정·저장한 뒤 **감시 모드**를 선택합니다. 서버는 해당 카메라 세션과 캡처의 경계를 검증하고, 차량 ONNX와 같은 프레임의 ArUco 관측으로 점유를 갱신합니다. 추론 오류는 unknown입니다. 기존 free 확인(2초 이상·3관측), 점유 TTL 5초, 위치 TTL 200ms를 적용합니다.
+3. 웹을 최소화해도 Python은 새 관측을 처리합니다. JPEG는 화면 표시용이며 원본 프레임에서 ArUco와 차량을 분석합니다. 창을 복원하면 같은 웹 화면에 결과가 표시됩니다. 페이지를 닫아도 서버와 카메라는 계속 작동합니다. **설정 모드**는 점유 감시를 중지하고 **카메라 중지** 또는 서버의 Ctrl+C는 카메라를 해제합니다. 카메라를 다시 열면 새 세션으로 맵을 다시 생성하세요.
+4. 현장 비교는 모터를 연결하지 않은 상태에서 별도 터미널로 아래 명령을 실행하고 처음 10초는 전면, 다음 10초는 최소화, 마지막 10초는 복원해 측정합니다. JSON의 `samples`에서 각 구간의 고유 `frame_id`, 촬영 시각, 검출·만료 상태를 대조하세요. 로버 실행 명령과 `/api/rover-pose`, `/api/parking-occupancy` 계약은 기존과 같습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.diagnose_aruco_tracking --label stationary --duration 30 --output-dir data/rover_runs/aruco/background_check
+```
+
+이미지·동영상 파일은 기존 웹 입력을 사용합니다. 브라우저 웹캠과 JPEG 업로드 방식을 쓰려면 `--camera-index` 대신 `--browser-camera`를 지정합니다. 아래 문서의 브라우저 JPEG Worker·인코딩 지연 안내는 이 모드에 해당합니다. 외부 `--web-root`의 기존 웹도 브라우저 입력을 사용합니다.
+
 ## 다른 PC에서 받기
 
 이 브랜치는 웹 실행에 필요한 `web/parkinghaeven/`과 실제 차량 모델 `web/parkinghaeven/models/parking_cars.onnx`를 포함합니다. 모델은 약 12.7MB의 일반 Git 바이너리이며 Git LFS 설치나 별도 모델 다운로드가 필요하지 않습니다. SHA-256과 입출력 규약은 [모델 정보](web/parkinghaeven/models/manifest.json)에 기록했습니다. 별도 `ParkingHaeven` 폴더 없이 아래 설치 절차 후 저장소 루트에서 실행합니다.
@@ -10,7 +29,7 @@
 .\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --marker-layout assets/maps/parking_map_real_markers.json
 ```
 
-[localhost:8001](http://localhost:8001)에서 차량 모델 로드 완료를 확인합니다. 브라우저의 ONNX Runtime Web 1.22.0과 Tailwind는 기존 CDN을 사용하므로 인터넷 연결이 필요합니다. `--web-root`로 별도 웹을 지정해도 해당 폴더에 `parking_cars.onnx`가 없으면 포함된 모델을 제공합니다. 개인별 최신 캡처·카메라 보정은 새 PC에서 다시 생성해야 합니다.
+[localhost:8001](http://localhost:8001)에서 카메라를 시작합니다. Python 카메라 모드에서는 감시를 시작할 때 서버가 차량 모델을 로드하고 실패 원인은 화면에 표시합니다. 웹 스타일과 브라우저 입력용 ONNX Runtime Web 1.22.0은 기존 CDN을 사용합니다. `--web-root`로 별도 웹을 지정해도 해당 폴더에 `parking_cars.onnx`가 없으면 포함된 모델을 제공합니다. 개인별 최신 캡처·카메라 보정은 새 PC에서 다시 생성해야 합니다.
 
 엔코더 연결의 기본 명령은 `python apps/qrover_encoder/web_drive.py`이며 모터 없이 사전 검사합니다. 실물 설정과 USB/Wi-Fi 실행은 [엔코더 실행 안내](apps/qrover_encoder/README_KO.md)를 따르세요.
 

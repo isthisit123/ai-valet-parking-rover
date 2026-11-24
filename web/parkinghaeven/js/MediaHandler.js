@@ -8,10 +8,61 @@ export class MediaHandler {
         this.videoElement = null;
         this.animationFrameId = null;
         this.isProcessing = false;
+        this.serverCamera = null;
+        this.cameraControl = Promise.resolve();
+    }
+
+    // 시작·모드 변경·정지를 클릭한 순서대로 적용한다.
+    cameraCommand(action, data = {}) {
+        const request = this.cameraControl.then(async () => {
+            const response = await fetch('/api/camera/' + action, {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error);
+            return result;
+        });
+        this.cameraControl = request.catch(() => {});
+        return request;
+    }
+
+    async showCameraFrame(source) {
+        const response = await fetch('/api/camera/preview.jpg?session=' + encodeURIComponent(source.session_id),
+            {cache: 'no-store', signal: AbortSignal.timeout(2000)});
+        if (!response.ok) throw new Error((await response.json()).error);
+        const bitmap = await createImageBitmap(await response.blob());
+        try {
+            if (source !== this.serverCamera) return;
+            this.ctx.drawImage(bitmap, 0, 0, this.canvas.width, this.canvas.height);
+        } finally { bitmap.close(); }
+    }
+
+    async previewCamera(source) {
+        if (source !== this.serverCamera) return;
+        try { await this.showCameraFrame(source); }
+        catch (error) {
+            if (source !== this.serverCamera) return;
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            document.getElementById('canvas-status').textContent = '카메라 미리보기 대기 · ' + error.message;
+        }
+        if (source === this.serverCamera) setTimeout(() => this.previewCamera(source), 100);
     }
 
     async initWebcam(deviceId = null) {
         try {
+            if (Number.isInteger(window.roverCameraIndex)) {
+                const source = await this.cameraCommand('start');
+                this.stopProcessing();
+                this.videoElement?.pause();
+                this.currentSourceType = 'webcam';
+                this.currentFile = null;
+                this.serverCamera = source;
+                const scale = Math.min(this.canvas.parentElement.clientWidth / source.width, 1);
+                this.canvas.width = Math.round(source.width * scale);
+                this.canvas.height = Math.round(source.height * scale);
+                await this.showCameraFrame(source);
+                setTimeout(() => this.previewCamera(source), 100);
+                return {success: true};
+            }
             const constraints = {
                 video: { width: { ideal: 1920 }, height: { ideal: 1080 }, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) }
             };
@@ -32,6 +83,7 @@ export class MediaHandler {
 
             return { success: true, stream };
         } catch (e) {
+            if (this.serverCamera) this.stop();
             console.error('Webcam init failed:', e);
             return { success: false, error: e.message };
         }
@@ -147,6 +199,13 @@ export class MediaHandler {
     }
 
     stop() {
+        if (this.serverCamera) {
+            const source = this.serverCamera;
+            this.serverCamera = null;
+            this.cameraCommand('stop', {session_id: source.session_id}).catch(error => {
+                document.getElementById('canvas-status').textContent = error.message;
+            });
+        }
         this.stopProcessing();
 
         if (this.videoElement && this.videoElement.srcObject) {

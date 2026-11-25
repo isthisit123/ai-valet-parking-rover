@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 from math import dist, isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -13,15 +14,21 @@ import time
 from src.map_processing.map_identity import require_map_identity
 from src.map_processing.path_visualizer import DEFAULT_ROUTE_CASES
 from .pose_sender import CapturePose, load_camera_position
+from .latest_json import LatestJsonWriter
 
 COMPARISON_MAX_AGE_SECONDS = 5.0
+SAVE_RETRY_DELAYS_S = (0.0, 0.01, 0.02)
+LOGGER = logging.getLogger(__name__)
 
 
 class ArrivalTest:
-    def __init__(self, map_root, *, marker_id=7, output_path=None, map_lock=None, parking=None):
+    def __init__(self, map_root, *, marker_id=7, output_path=None, map_lock=None, parking=None,
+                 async_persistence=False):
         self.map_root = Path(map_root).resolve()
         self.marker_id = marker_id
         self.output_path = Path(output_path) if output_path is not None else None
+        self.writer = LatestJsonWriter(self.output_path) if async_persistence and self.output_path is not None else None
+        self._in_observe = self._save_deferred = False
         self.map_lock = map_lock or threading.RLock()
         self.lock = threading.RLock()
         self.state = {"status": "idle", "planning_mode": "image_pixel_test", "motor_commands": False,
@@ -42,6 +49,7 @@ class ArrivalTest:
         self.last_known_position = None
         self.position_converter = None
         self.camera_settings_bytes = None
+        self.save_elapsed_ms = 0.0
 
     def _load_position_converter(self, folder):
         path = folder / "world/camera_position.json"
@@ -204,19 +212,58 @@ class ArrivalTest:
                               reason=reason)
 
     def _save(self):
+        started = time.perf_counter()
+        try:
+            if self.writer is not None:
+                if self._in_observe:
+                    self._save_deferred = True
+                else:
+                    self.writer.submit({key: value for key, value in self.state.items()
+                                        if key != 'persistence_warning'})
+                return True
+            return self._write_state()
+        finally:
+            self.save_elapsed_ms += (time.perf_counter() - started) * 1000
+
+    def _snapshot(self):
+        result = deepcopy(self.state)
+        return self.writer.annotate(result) if self.writer is not None else result
+
+    def _write_state(self):
         if self.output_path is None:
-            return
+            return True
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         pending = None
         try:
             with NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.output_path.parent,
                                     prefix=".arrival-", delete=False) as stream:
                 pending = Path(stream.name)
-                json.dump(self.state, stream, ensure_ascii=False, allow_nan=False)
-            pending.replace(self.output_path)
+                payload = {key: value for key, value in self.state.items() if key != 'persistence_warning'}
+                json.dump(payload, stream, ensure_ascii=False, allow_nan=False)
+            for attempt, delay in enumerate(SAVE_RETRY_DELAYS_S):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    pending.replace(self.output_path)
+                    self.state.pop('persistence_warning', None)
+                    return True
+                except OSError as error:
+                    if getattr(error, 'winerror', None) not in (5, 32, 33):
+                        raise
+                    if attempt == len(SAVE_RETRY_DELAYS_S) - 1:
+                        # 파일은 진단용 사본이다. 현재 메모리 상태와 위치 유효성 검사는 계속 제공한다.
+                        warning = (f'도착 상태 JSON 저장 지연 (WinError {error.winerror}): {self.output_path}. '
+                                   '이전 파일을 보존하며 현재 상태는 API에서 제공합니다.')
+                        if self.state.get('persistence_warning') != warning:
+                            LOGGER.warning(warning)
+                        self.state['persistence_warning'] = warning
+                        return False
         finally:
             if pending is not None:
-                pending.unlink(missing_ok=True)
+                try:
+                    pending.unlink(missing_ok=True)
+                except OSError as error:
+                    LOGGER.warning('도착 상태 임시 파일 정리 보류: %s (%s)', pending, error)
 
     def stop(self, reason="user_stopped"):
         with self.lock:
@@ -266,9 +313,18 @@ class ArrivalTest:
                 self._refresh_parking(now)
             if (self.state["status"] in ("running", "holding", "waiting_for_tracking") and
                     self.last_pose_expires is not None and now > self.last_pose_expires):
+                signature = self._tracking_signature()
                 self._tracking_missing(now, "tracking_stale")
-                self._save()
-            return deepcopy(self.state)
+                # tracking_gap_ms만 바뀌는 반복 GET에서는 파일을 다시 기록하지 않는다.
+                if self._tracking_signature() != signature:
+                    self._save()
+            return self._snapshot()
+
+    def _tracking_signature(self):
+        return (self.state.get('status'), self.state.get('reason'), self.state.get('tracking_available'),
+                self.state.get('tracking_paused'), self.hold_start,
+                self.state.get('last_known_position_px'), self.state.get('current_position_px'),
+                self.state.get('guidance_available'))
 
     def _refresh_parking(self, now):
         if self.state["status"] in ("idle", "stopped", "invalidated", "success"):
@@ -324,6 +380,31 @@ class ArrivalTest:
             self._save()
 
     def observe(self, observation, *, now=None):
+        started = time.perf_counter()
+        with self.lock:
+            saved_before = self.save_elapsed_ms
+            if self.position_converter is not None:
+                self.position_converter.last_timing_ms = {}
+            self._in_observe, self._save_deferred = True, False
+            try:
+                result = self._observe(observation, now=now)
+            finally:
+                self._in_observe = False
+                if self._save_deferred:
+                    self._save_deferred = False
+                    self._save()
+            conversion = self.position_converter.last_timing_ms if self.position_converter is not None else {}
+            timing = {'total_ms': (time.perf_counter() - started) * 1000,
+                      'save_ms': self.save_elapsed_ms - saved_before,
+                      # 미검출·만료로 변환하지 않은 프레임은 0ms로 오인하지 않도록 null로 표시한다.
+                      'map_validation_ms': conversion.get('map_validation_ms'),
+                      'cm_math_ms': conversion.get('cm_math_ms'),
+                      'conversion_total_ms': conversion.get('total_ms')}
+            self.state['timing_ms'] = timing
+            result['timing_ms'] = deepcopy(timing)
+            return self.writer.annotate(result) if self.writer is not None else result
+
+    def _observe(self, observation, *, now=None):
         now = time.monotonic() if now is None else now
         with self.lock:
             self.current(now=now)

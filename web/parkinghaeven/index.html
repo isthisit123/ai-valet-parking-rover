@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 주차 관리 시스템</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+    <style>
+        .tab-active {
+            background-color: #3b82f6;
+            color: white;
+        }
+        .region-polygon {
+            cursor: move;
+        }
+        .point-handle {
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <div class="container mx-auto px-4 py-6">
+        <!-- Header -->
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-center mb-2">AI 주차 관리 시스템</h1>
+            <p class="text-gray-400 text-center">YOLOv8 ONNX 기반 브라우저 네이티브 주차 탐지</p>
+        </header>
+
+        <!-- Main Layout -->
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- Left Panel: Controls -->
+            <div class="lg:col-span-1 space-y-4">
+                <!-- Source Selection Tabs -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-lg font-semibold mb-3">입력 소스 선택</h2>
+                    <div class="flex gap-2 mb-4">
+                        <button id="tab-webcam" class="tab-btn flex-1 py-2 px-3 rounded bg-gray-700 hover:bg-gray-600 transition tab-active" data-source="webcam">
+                            웹캠
+                        </button>
+                        <button id="tab-image" class="tab-btn flex-1 py-2 px-3 rounded bg-gray-700 hover:bg-gray-600 transition" data-source="image">
+                            이미지
+                        </button>
+                        <button id="tab-video" class="tab-btn flex-1 py-2 px-3 rounded bg-gray-700 hover:bg-gray-600 transition" data-source="video">
+                            비디오
+                        </button>
+                    </div>
+
+                    <!-- File Upload Area -->
+                    <div id="file-upload-area" class="hidden">
+                        <label class="block mb-2 text-sm text-gray-300">파일 선택</label>
+                        <input type="file" id="file-input" class="w-full text-sm text-gray-400 file:mr-2 file:py-2 file:px-3 file:rounded file:border-0 file:bg-blue-600 file:text-white hover:file:bg-blue-700" accept="image/*,video/*">
+                        <p id="file-name" class="mt-2 text-sm text-gray-500 truncate"></p>
+
+                        <!-- Sample Files Section -->
+                        <div class="mt-4 pt-4 border-t border-gray-700">
+                            <p class="text-sm text-gray-400 mb-2">샘플 파일</p>
+                            <div id="sample-files-list" class="space-y-1 max-h-32 overflow-y-auto">
+                                <p class="text-xs text-gray-500">샘플 파일이 없습니다</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Webcam Controls -->
+                    <div id="webcam-controls">
+                        <select id="webcam-select" class="w-full bg-gray-700 rounded p-2 mb-2">
+                            <option value="">웹캠 선택...</option>
+                        </select>
+                        <button id="webcam-start-btn" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded transition">
+                            웹캠 시작
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Mode Selection -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-lg font-semibold mb-3">모드 선택</h2>
+                    <div class="flex gap-2 mb-3">
+                        <button id="mode-setup" class="flex-1 py-2 px-3 rounded bg-yellow-600 hover:bg-yellow-700 transition">
+                            설정 모드
+                        </button>
+                        <button id="mode-monitor" class="flex-1 py-2 px-3 rounded bg-gray-700 hover:bg-gray-600 transition">
+                            감시 모드
+                        </button>
+                    </div>
+
+                    <!-- Setup Mode Sub-modes -->
+                    <div id="setup-submodes" class="hidden">
+                        <p class="text-xs text-gray-400 mb-2">설정 모드:</p>
+                        <div class="flex gap-2 mb-2">
+                            <button id="submode-add" class="flex-1 py-1 px-2 text-sm rounded bg-green-600 hover:bg-green-700 transition">
+                                + 추가
+                            </button>
+                            <button id="submode-edit" class="flex-1 py-1 px-2 text-sm rounded bg-gray-700 hover:bg-gray-600 transition">
+                                ✏️ 수정
+                            </button>
+                        </div>
+                        <p id="submode-status" class="text-xs text-green-400">
+                            추가 모드: 새 구역을 그립니다
+                        </p>
+                    </div>
+
+                    <p id="mode-description" class="mt-3 text-sm text-gray-400">
+                        주차 구역을 다각형으로 그려서 설정하세요
+                    </p>
+                </div>
+
+                <!-- Source Info -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-lg font-semibold mb-3">소스 정보</h2>
+                    <div class="text-sm space-y-1">
+                        <p class="text-gray-400">Source ID:</p>
+                        <p id="source-id" class="text-xs font-mono bg-gray-700 p-2 rounded break-all">-</p>
+                    </div>
+                </div>
+
+                <!-- Keyboard Shortcuts -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h2 class="text-lg font-semibold mb-3">단축키</h2>
+                    <div class="text-xs text-gray-400 space-y-1">
+                        <p><kbd class="bg-gray-700 px-1 rounded">Enter</kbd> - 구역 완료</p>
+                        <p><kbd class="bg-gray-700 px-1 rounded">Esc</kbd> - 취소</p>
+                        <p><kbd class="bg-gray-700 px-1 rounded">Del</kbd> - 선택 구역 삭제 (수정 모드)</p>
+                        <p><kbd class="bg-gray-700 px-1 rounded">Ctrl+S</kbd> - 저장</p>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="bg-gray-800 rounded-lg p-4 space-y-2">
+                    <button id="add-region-btn" class="w-full bg-green-600 hover:bg-green-700 py-2 rounded transition">
+                        + 주차 구역 추가
+                    </button>
+                    <button id="clear-regions-btn" class="w-full bg-red-600 hover:bg-red-700 py-2 rounded transition">
+                        모든 구역 삭제
+                    </button>
+                    <button id="save-config-btn" class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded transition">
+                        설정 저장
+                    </button>
+                </div>
+
+                <!-- Import/Export -->
+                <div class="bg-gray-800 rounded-lg p-4 space-y-2">
+                    <h3 class="text-sm font-semibold text-gray-400">좌표 관리</h3>
+                    <button id="export-btn" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded transition text-sm">
+                        📤 현재 파일 좌표 내보내기
+                    </button>
+                    <button id="export-all-btn" class="w-full bg-cyan-600 hover:bg-cyan-700 py-2 rounded transition text-sm">
+                        📦 전체 좌표 내보내기
+                    </button>
+                    <button id="import-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 py-2 rounded transition text-sm">
+                        📥 좌표 가져오기
+                    </button>
+                    <input type="file" id="import-file" accept=".json" class="hidden">
+                </div>
+            </div>
+
+            <!-- Right Panel: Canvas & Stats -->
+            <div class="lg:col-span-3 space-y-4">
+                <!-- Stats Dashboard -->
+                <div class="grid grid-cols-3 gap-4">
+                    <div class="bg-gray-800 rounded-lg p-4 text-center">
+                        <p class="text-gray-400 text-sm">전체 주차면</p>
+                        <p id="total-spaces" class="text-3xl font-bold text-white">0</p>
+                    </div>
+                    <div class="bg-gray-800 rounded-lg p-4 text-center">
+                        <p class="text-gray-400 text-sm">점유 중</p>
+                        <p id="occupied-spaces" class="text-3xl font-bold text-red-500">0</p>
+                    </div>
+                    <div class="bg-gray-800 rounded-lg p-4 text-center">
+                        <p class="text-gray-400 text-sm">잔여</p>
+                        <p id="free-spaces" class="text-3xl font-bold text-green-500">0</p>
+                    </div>
+                </div>
+
+                <!-- Main Canvas Container -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <div class="relative">
+                        <canvas id="main-canvas" class="w-full bg-black rounded-lg"></canvas>
+                        <canvas id="overlay-canvas" class="absolute top-0 left-0 w-full pointer-events-none"></canvas>
+                    </div>
+                    <p id="canvas-status" class="mt-2 text-center text-sm text-gray-500">
+                        입력 소스를 선택하세요
+                    </p>
+                </div>
+
+                <!-- Detection Log -->
+                <div class="bg-gray-800 rounded-lg p-4">
+                    <h3 class="text-lg font-semibold mb-2">감지 로그</h3>
+                    <div id="detection-log" class="h-32 overflow-y-auto text-sm font-mono bg-gray-900 p-2 rounded">
+                        <p class="text-gray-500">대기 중...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden Video Element for Processing -->
+    <video id="video-element" class="hidden" playsinline loop muted></video>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

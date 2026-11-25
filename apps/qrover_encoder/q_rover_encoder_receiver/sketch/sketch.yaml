@@ -1,0 +1,9 @@
+profiles:
+  default:
+    fqbn: arduino:zephyr:unoq
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - Adafruit_VL53L0X (1.2.5)
+
+default_profile: default

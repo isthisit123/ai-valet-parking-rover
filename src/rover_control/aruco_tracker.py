@@ -13,6 +13,8 @@ import time
 import cv2
 import numpy as np
 
+from .latest_json import LatestJsonWriter
+
 
 MAX_AGE_SECONDS = 0.20
 ROI_HINT_SECONDS = 0.75
@@ -35,7 +37,8 @@ def marker_geometry(corners, front_offset_deg=0.0):
 
 
 class ArucoTracker:
-    def __init__(self, *, marker_id=7, dictionary="DICT_4X4_50", front_offset_deg=0.0, output_path=None):
+    def __init__(self, *, marker_id=7, dictionary="DICT_4X4_50", front_offset_deg=0.0, output_path=None,
+                 async_persistence=False):
         if not dictionary.startswith("DICT_") or not hasattr(cv2.aruco, dictionary):
             raise ValueError(f"지원하지 않는 ArUco 사전: {dictionary}")
         self.dictionary = dictionary
@@ -47,6 +50,7 @@ class ArucoTracker:
         self.marker_id = marker_id
         self.front_offset_deg = front_offset_deg
         self.output_path = Path(output_path) if output_path is not None else None
+        self.writer = LatestJsonWriter(self.output_path) if async_persistence and self.output_path is not None else None
         self.detectors = []
         for threshold in (7, 5):
             parameters = cv2.aruco.DetectorParameters()
@@ -56,6 +60,7 @@ class ArucoTracker:
             self.detectors.append(cv2.aruco.ArucoDetector(codebook, parameters))
         self._latest = None
         self._lock = threading.RLock()
+        self._observe_lock = threading.Lock()
         self._roi_hint = None
         self._contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         self._recent = deque(maxlen=20)
@@ -117,7 +122,8 @@ class ArucoTracker:
     def observe(self, image, *, received_monotonic_s=None, client_captured_at=None, frame_id=None, camera_source=None):
         received = time.monotonic() if received_monotonic_s is None else received_monotonic_s
         start = time.perf_counter()
-        with self._lock:
+        # 검출기·ROI 이력은 직렬화하되 current()가 이전 관측의 만료를 즉시 확인할 수 있게 한다.
+        with self._observe_lock:
             context = (camera_source, image.shape[:2])
             if context != self._source_context:
                 self._recent.clear()
@@ -133,7 +139,7 @@ class ArucoTracker:
             matches = [marker for marker in markers if marker["id"] == self.marker_id]
             status = "detected" if len(matches) == 1 else "ambiguous" if matches else "lost"
             self._recent.append(status)
-            self._latest = {
+            observation = {
                 "tracking_status": status, "dictionary": self.dictionary, "rover_marker_id": self.marker_id,
                 "detection_status": status,
                 "detection_method": method, "rejected_candidate_count": rejected,
@@ -154,13 +160,19 @@ class ArucoTracker:
                 "frame_id": frame_id, "processing_ms": (time.perf_counter() - start) * 1000,
                 "camera_source": camera_source,
             }
+            with self._lock:
+                self._latest = observation
             result = self.current()
             if result["tracking_status"] == "detected":
                 self._roi_hint = {"corners": matches[0]["corners_px"], "received": received,
                                   "shape": image.shape[:2], "camera_source": deepcopy(camera_source)}
             elif status == "ambiguous":
                 self._roi_hint = None
-            if self.output_path is not None:
+            save_started = time.perf_counter()
+            if self.writer is not None:
+                self.writer.submit({key: value for key, value in result.items()
+                                    if key not in ('persistence', 'persistence_warning')})
+            elif self.output_path is not None:
                 self.output_path.parent.mkdir(parents=True, exist_ok=True)
                 pending = None
                 try:
@@ -173,7 +185,12 @@ class ArucoTracker:
                 finally:
                     if pending is not None:
                         pending.unlink(missing_ok=True)
-            return result
+            timing = {'save_ms': (time.perf_counter() - save_started) * 1000,
+                      'total_ms': (time.perf_counter() - start) * 1000}
+            with self._lock:
+                self._latest['tracking_timing_ms'] = timing
+            result['tracking_timing_ms'] = deepcopy(timing)
+            return self.writer.annotate(result) if self.writer is not None else result
 
     def current(self):
         with self._lock:
@@ -194,4 +211,4 @@ class ArucoTracker:
                     capture_valid = False
             if result["age_ms"] > result["valid_for_ms"] or not capture_valid:
                 result.update(tracking_status="stale", rover=None, markers=[])
-            return result
+            return self.writer.annotate(result) if self.writer is not None else result

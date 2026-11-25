@@ -67,15 +67,16 @@
                 throw new Error('카메라 좌표를 등록하려면 먼저 웹캠을 시작하세요.');
             }
             for (const input of Object.values(inputs)) input.disabled = true;
-            frame.width = source.width;
-            frame.height = source.height;
-            frame.getContext('2d').drawImage(source, 0, 0);
+            const native = Boolean(window.parkingApp?.mediaHandler?.serverCamera);
+            frame.width = native ? captured.width : source.width;
+            frame.height = native ? captured.height : source.height;
+            if (!native) frame.getContext('2d').drawImage(source, 0, 0);
             const capturedAt = new Date().toISOString();
-            const blob = await new Promise(resolve => frame.toBlob(resolve, 'image/png'));
-            if (!blob) throw new Error('PNG 인코딩 실패');
+            const blob = native ? null : await new Promise(resolve => frame.toBlob(resolve, 'image/png'));
+            if (!native && !blob) throw new Error('PNG 인코딩 실패');
             window.dispatchEvent(new CustomEvent('rover-map-start'));
             status.textContent = `${frame.width}×${frame.height} PNG 전송 · OCR · 지도 및 경로 생성 중…`;
-            const response = await fetch('/api/map-capture', {
+            const response = await fetch(native ? '/api/camera/map-capture' : '/api/map-capture', {
                 method: 'POST', headers: {'Content-Type': 'image/png', 'X-Captured-At': capturedAt,
                     'X-Camera-Session': captured.session_id,
                     'X-Source-Type': captured.kind,

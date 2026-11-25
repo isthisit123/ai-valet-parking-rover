@@ -5,6 +5,9 @@
         const media = app?.mediaHandler;
         const video = media?.videoElement;
         const kind = media?.currentSourceType || '';
+        if (kind === 'webcam' && media.serverCamera) {
+            return {sourceId: app.currentSourceId, ...media.serverCamera};
+        }
         const track = kind === 'webcam' ? video?.srcObject?.getVideoTracks?.()[0] : null;
         return {sourceId: app?.currentSourceId, kind,
             session_id: track?.id || '', width: kind === 'image' ? 0 : video?.videoWidth || 0,

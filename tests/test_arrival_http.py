@@ -51,7 +51,7 @@ class ArrivalHttpTest(unittest.TestCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(
             root, maps, DEFAULT_MAP.label_path, root / "mapping.json",
             aruco_output_path=root / "pose/latest.json", arrival_output_path=output,
-            occupancy_output_path=root / 'occupancy/latest.json'))
+            occupancy_output_path=root / 'occupancy/latest.json', async_diagnostics=True))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{server.server_port}"
@@ -124,6 +124,9 @@ class ArrivalHttpTest(unittest.TestCase):
                            "X-Source-Width": "400", "X-Source-Height": "400", "X-Frame-Id": str(index)}
                 with urlopen(Request(url + "/api/aruco", encoded.tobytes(), headers)) as response:
                     result = json.load(response)["arrival_test"]
+                if index == 0:
+                    for key in ('cm_math_ms', 'map_validation_ms', 'conversion_total_ms', 'save_ms', 'total_ms'):
+                        self.assertGreaterEqual(result['timing_ms'][key], 0)
                 pose = converter.convert(get("/api/rover-pose"))
                 self.assertTrue(pose["height_correction_applied"])
                 self.assertEqual(pose["unit"], "cm")
@@ -139,6 +142,7 @@ class ArrivalHttpTest(unittest.TestCase):
                 time.sleep(0.105)
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["case_id"], case)
+            self.assertTrue(server.RequestHandlerClass.flush_diagnostics())
             self.assertEqual(json.loads(output.read_text())["status"], "success")
             self.assertEqual(get("/api/arrival-test")["status"], "success")
             # 웹 성공 표시는 유지되더라도 마커가 사라진 관측을 주행 좌표로 재사용하지 않는다.
@@ -156,6 +160,7 @@ class ArrivalHttpTest(unittest.TestCase):
             server.shutdown()
             thread.join()
             server.server_close()
+            server.RequestHandlerClass.close_diagnostics()
 
 
 if __name__ == "__main__":

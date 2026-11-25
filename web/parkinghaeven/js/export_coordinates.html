@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>LocalStorage 좌표 추출기</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #fff; }
+        button { padding: 10px 20px; margin: 10px; cursor: pointer; background: #3b82f6; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #2563eb; }
+        textarea { width: 100%; height: 300px; background: #2d2d2d; color: #fff; border: 1px solid #444; padding: 10px; }
+        .file-name { background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>LocalStorage 주차 구역 좌표 추출</h1>
+    <p>아래 버튼을 클릭하여 현재 저장된 좌표를 확인하세요</p>
+
+    <button onclick="exportCoordinates()">좌표 내보내기</button>
+    <button onclick="copyToClipboard()">클립보드에 복사</button>
+    <button onclick="downloadJson()">JSON 파일 다운로드</button>
+
+    <h2>저장된 좌표 데이터</h2>
+    <div id="output"></div>
+
+    <textarea id="jsonOutput" readonly></textarea>
+
+    <script>
+        function exportCoordinates() {
+            const config = localStorage.getItem('PARKING_SYSTEM_CONFIG');
+            const output = document.getElementById('output');
+            const textarea = document.getElementById('jsonOutput');
+
+            if (!config) {
+                output.innerHTML = '<p style="color: #ef4444;">저장된 좌표가 없습니다</p>';
+                textarea.value = '';
+                return;
+            }
+
+            const data = JSON.parse(config);
+            let html = '<ul style="list-style: none;">';
+
+            for (const [sourceId, regions] of Object.entries(data)) {
+                if (regions.length > 0) {
+                    html += `<li><span class="file-name">${sourceId}</span>: ${regions.length}개 구역</li>`;
+                }
+            }
+
+            html += '</ul>';
+            output.innerHTML = html;
+            textarea.value = JSON.stringify(data, null, 2);
+        }
+
+        function copyToClipboard() {
+            const textarea = document.getElementById('jsonOutput');
+            if (!textarea.value) {
+                alert('먼저 좌표를 내보내세요');
+                return;
+            }
+            textarea.select();
+            document.execCommand('copy');
+            alert('클립보드에 복사되었습니다!');
+        }
+
+        function downloadJson() {
+            const textarea = document.getElementById('jsonOutput');
+            if (!textarea.value) {
+                alert('먼저 좌표를 내보내세요');
+                return;
+            }
+
+            const blob = new Blob([textarea.value], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'parking_regions.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // 자동으로 실행
+        exportCoordinates();
+    </script>
+</body>
+</html>

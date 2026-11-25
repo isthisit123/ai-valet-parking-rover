@@ -38,6 +38,14 @@ class LiveParking:
         self.plan_cache = {}
         self.cache_states = None
 
+    def clear_observations(self):
+        """감시 중단·구역 변경 직후 이전 free를 더 이상 사용하지 않는다."""
+        with self.lock:
+            self.snapshot = self.received = self.last_observed = None
+            self.free_since.clear()
+            self.samples.clear()
+            self.plan_cache.clear()
+
     def _context(self):
         with self.map_lock:
             root = self.map_root / "latest"

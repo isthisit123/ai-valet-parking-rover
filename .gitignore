@@ -20,9 +20,36 @@ Thumbs.db
 # 로컬 보관 자료
 /archives/
 
+# 엔코더 수신 앱 ZIP 재생성 전 로컬 백업
+/apps/qrover_encoder/backups/
+
 # HTTP로 받은 원본 카메라 사진과 회차별 맵 결과
 /data/http_map_captures/
 /data/ocr_building_tests/
 
 # 로버 미리보기와 실행별 결과
 /data/rover_runs/
+
+# 카메라로 매번 생성하는 로컬 지도 입력
+/assets/maps/parking_map_capture*
+
+# 기본 지도 계약(graph/semantic)만 보관하고 생성된 경로·미리보기는 제외
+/data/maps/*
+!/data/maps/parking_map_real/
+/data/maps/parking_map_real/*
+!/data/maps/parking_map_real/graph.json
+!/data/maps/parking_map_real/semantic.json
+
+# 실행 시 바뀌는 점유·재생 결과 (사용 설명은 유지)
+/data/occupancy/**/*.json
+/data/occupancy/**/*.jsonl
+/data/occupancy/**/*.png
+/data/occupancy/**/*.csv
+
+# 최종 수신 앱으로 대체한 로컬 전진 시험 앱
+/apps/qrover_forward_test/
+/apps/qrover_forward_test.zip
+
+# 중복 Export 보관본 대신 정식 수신 앱 경로를 사용
+/apps/qrover_encoder/applab_verified/
+/apps/qrover_encoder/q_rover_encoder_receiver_verified.zip

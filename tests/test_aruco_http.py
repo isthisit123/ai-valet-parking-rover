@@ -50,6 +50,8 @@ class ArucoHttpTest(unittest.TestCase):
                                     ('/parking-detection-worker.js', b'MIN_VEHICLE_CONFIDENCE = 0.70')]:
                 with urlopen(url + asset) as response:
                     self.assertIn(expected, response.read())
+            with urlopen(url + '/aruco-frame-worker.js') as response:
+                self.assertIn(b'convertToBlob', response.read())
             with urlopen(url + "/js/ArUcoBridge.js") as response:
                 self.assertIn(b"export class ArUcoBridge", response.read())
             _, encoded = cv2.imencode(".png", marker_image())
@@ -58,11 +60,15 @@ class ArucoHttpTest(unittest.TestCase):
             self.assertEqual(result["rover"]["id"], 7)
             self.assertEqual(result["coordinate_frame"], "camera_image")
             self.assertIsNone(result["map_pose"])
+            for field in ('request_body_ms', 'decode_ms', 'tracker_ms', 'tracker_save_ms', 'arrival_ms', 'total_ms'):
+                self.assertGreaterEqual(result['server_timing_ms'][field], 0)
+            self.assertIsNone(result['arrival_test']['timing_ms']['cm_math_ms'])
             self.assertTrue(output.is_file())
             with urlopen(url + '/api/aruco-debug') as response:
                 diagnostic = json.load(response)
             self.assertEqual(diagnostic['image_sha256'], hashlib.sha256(encoded.tobytes()).hexdigest())
             self.assertEqual(diagnostic['detection_status'], 'detected')
+            self.assertEqual(diagnostic['server_timing_ms'], result['server_timing_ms'])
             self.assertEqual(diagnostic['detection_attempt_details'][0]['decoded_ids'], [7])
             self.assertIsInstance(diagnostic['fallback_budget_exhausted'], bool)
             _, jpeg = cv2.imencode('.jpg', marker_image(), [cv2.IMWRITE_JPEG_QUALITY, 85])

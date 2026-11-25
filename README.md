@@ -1,6 +1,70 @@
 # Q-ROVER — AI Valet Parking Rover
 
-지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. 현재 **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**, 검증된 cm 경로 생성과 **ArUco 픽셀 → 월드 cm 위치·방향 → 주행기 UDP 입력**을 구현했습니다. 실시간 점유는 웹의 픽셀 경로·도착 시험에 연결되어 있습니다. 실시간 경로 변경의 모터 주행 연결과 실물 주행 검증은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
+지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 목적지·점유·ArUco 위치를 받아 UNO Q에 연결합니다. 2026-11-25 사용자가 실물 주행 정상 동작을 확인했으며, 해당 App Lab Export와 소스를 최종 수신 앱으로 반영했습니다. 상세 검증 기록은 [로드맵](docs/ROADMAP.md)에 있습니다.
+
+## 최종 버전 실행 순서 — App Lab·핫스팟·웹캠 1번
+
+명령은 저장소 루트의 PowerShell에서 실행합니다. 처음 받았다면 아래 **설치 및 지도 생성**의 가상환경·의존성 설치를 먼저 진행합니다. PC와 UNO Q를 같은 핫스팟에 연결하고, 보드의 현재 IP는 App Lab에서 확인합니다. 개인 핫스팟 IP·SSID·비밀번호는 저장소에 기록하지 않습니다.
+
+1. **App Lab 앱 준비 및 Run.** `apps/qrover_encoder/q_rover_encoder_receiver.zip`을 Import하고 **Q-ROVER Encoder Receiver**를 엽니다. 이 ZIP과 `apps/qrover_encoder/q_rover_encoder_receiver/` 소스는 최종 Export의 같은 버전입니다. Run 후 Python 콘솔의 `Q-ROVER TCP 8765 | MCU stopped | step / timed_step`를 확인합니다. 기존에 가져온 앱은 저장소 파일을 바꿔도 자동 갱신되지 않으므로 최종 ZIP을 다시 Import합니다.
+2. **첫 번째 PowerShell에서 웹 서버 실행.** 외장 웹캠 번호가 1인 환경의 명령입니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m scripts.http_map_server --port 8001 --camera-index 1 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+3. **웹에서 지도와 목적지 준비.** [ParkingHaeven](http://localhost:8001)을 열고 카메라 시작 → 현재 렌즈 위치·마커 높이 입력 → 로버를 치운 빈 지도 PNG 전송·맵 생성 → cm 보정 검증 → 주차칸 경계 확인·저장 → 감시 모드 순서로 진행합니다. 마커가 보이는 로버를 놓고 원하는 빈칸을 직접 선택한 뒤 **테스트 시작**을 누릅니다. 실행마다 현재 테스트의 `parking_space_id`를 읽으므로 특정 주차칸을 코드에 고정하지 않습니다.
+4. **두 번째 PowerShell에서 보드 주소 입력 및 사전 검사.** 실측 윤거는 좌우 바퀴 중심 간 거리 15cm입니다. 아래 사전 검사는 보드에 연결하거나 모터 명령을 보내지 않습니다.
+
+```powershell
+$roverHost = Read-Host '보드의 핫스팟 IP 주소'
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive
+```
+
+5. **같은 PowerShell에서 실주행.** 목적지 ID·중심 좌표와 관측된 출발점을 확인한 뒤 실행합니다. 최종 MCU는 엔코더 `step` 방식이므로 `--encoder-drive`를 포함합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive --drive
+```
+
+6. **정지 및 다음 실행.** 웹 **테스트 중단** 또는 주행 터미널 **Ctrl+C**로 정지합니다. 마커가 잠시 사라지면 제동한 채 기다리고 같은 테스트의 새 관측에서 자동 재개합니다. 마커 중심이 목표 중심의 기본 2cm 반경에 들어오면 방향과 무관하게 정지합니다. 새 테스트를 시작했거나 통신·MCU 오류로 종료됐다면 원인을 확인하고 실주행 명령을 다시 실행합니다.
+
+최종 앱은 HC-020K 엔코더 D2/D7, 모터 D5/D3·D6/D9, 왼쪽 극성 `1`·오른쪽 `-1`, PWM `150`을 사용합니다. ToF는 최종 Export에서 비활성화되어 장애물 자동 정지를 제공하지 않습니다. 배선·극성·전원 설정은 해당 실물 환경 기준입니다. USB/ADB 연결과 상세 동작은 [수신 앱 안내](apps/qrover_encoder/README_KO.md)를 참고하세요.
+
+실행 중 생성되는 카메라 사진·보정 JSON·진단 로그는 PC에 남으며 Git에서 제외합니다. 기본 지도 입력·기준점·graph/semantic·차량 ONNX 모델은 배포에 포함합니다. 새 PC에서는 현재 카메라 세션으로 지도 생성과 보정을 다시 수행합니다.
+
+## Python 웹캠으로 백그라운드 감시
+
+내장 ParkingHaeven 웹의 기본 카메라 입력은 Python입니다. 아래 명령으로 서버를 켜고 웹에서 **카메라 시작**을 누르면 OpenCV가 장치를 한 번 엽니다. 기본 장치 번호는 0이며 외장 카메라가 1번이면 숫자를 바꾸세요.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --camera-index 0 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+1. [ParkingHaeven](http://localhost:8001)을 Ctrl+F5로 열고 **카메라 시작**을 누릅니다. 빈 전지를 촬영하고 현재 렌즈 좌표를 입력한 뒤 **현재 화면 PNG 전송 · 맵 생성**을 누릅니다. Python이 최신 원본 프레임을 PNG로 만들어 기존 OCR·경로·cm 보정 흐름에 전달합니다.
+2. 여섯 칸의 경계를 확인하고 필요하면 수정·저장한 뒤 **감시 모드**를 선택합니다. 서버는 해당 카메라 세션과 캡처의 경계를 검증하고, 차량 ONNX와 같은 프레임의 ArUco 관측으로 점유를 갱신합니다. 추론 오류는 unknown입니다. 기존 free 확인(2초 이상·3관측), 점유 TTL 5초, 위치 TTL 200ms를 적용합니다.
+3. 웹을 최소화해도 Python은 새 관측을 처리합니다. JPEG는 화면 표시용이며 원본 프레임에서 ArUco와 차량을 분석합니다. 창을 복원하면 같은 웹 화면에 결과가 표시됩니다. 페이지를 닫아도 서버와 카메라는 계속 작동합니다. **설정 모드**는 점유 감시를 중지하고 **카메라 중지** 또는 서버의 Ctrl+C는 카메라를 해제합니다. 카메라를 다시 열면 새 세션으로 맵을 다시 생성하세요.
+4. 현장 비교는 모터를 연결하지 않은 상태에서 별도 터미널로 아래 명령을 실행하고 처음 10초는 전면, 다음 10초는 최소화, 마지막 10초는 복원해 측정합니다. JSON의 `samples`에서 각 구간의 고유 `frame_id`, 촬영 시각, 검출·만료 상태를 대조하세요. 로버 실행 명령과 `/api/rover-pose`, `/api/parking-occupancy` 계약은 기존과 같습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.diagnose_aruco_tracking --label stationary --duration 30 --output-dir data/rover_runs/aruco/background_check
+```
+
+카메라 프레임이 분석 목표 주기보다 느리면 새 프레임 도착 알림으로 ArUco 분석을 시작합니다. 프레임이 없는 동안 분석 주기를 반복 대기하며 생기는 추가 지연을 줄이고, 빠른 카메라에서는 설정된 분석 주기를 적용합니다. 적용하려면 서버를 재시작하고 새 카메라 세션으로 지도를 다시 생성하세요.
+
+이미지·동영상 파일은 기존 웹 입력을 사용합니다. 브라우저 웹캠과 JPEG 업로드 방식을 쓰려면 `--camera-index` 대신 `--browser-camera`를 지정합니다. 아래 문서의 브라우저 JPEG Worker·인코딩 지연 안내는 이 모드에 해당합니다. 외부 `--web-root`의 기존 웹도 브라우저 입력을 사용합니다.
+
+## 다른 PC에서 받기
+
+이 브랜치는 웹 실행에 필요한 `web/parkinghaeven/`과 실제 차량 모델 `web/parkinghaeven/models/parking_cars.onnx`를 포함합니다. 모델은 약 12.7MB의 일반 Git 바이너리이며 Git LFS 설치나 별도 모델 다운로드가 필요하지 않습니다. SHA-256과 입출력 규약은 [모델 정보](web/parkinghaeven/models/manifest.json)에 기록했습니다. 별도 `ParkingHaeven` 폴더 없이 아래 설치 절차 후 저장소 루트에서 실행합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+[localhost:8001](http://localhost:8001)에서 카메라를 시작합니다. Python 카메라 모드에서는 감시를 시작할 때 서버가 차량 모델을 로드하고 실패 원인은 화면에 표시합니다. 웹 스타일과 브라우저 입력용 ONNX Runtime Web 1.22.0은 기존 CDN을 사용합니다. `--web-root`로 별도 웹을 지정해도 해당 폴더에 `parking_cars.onnx`가 없으면 포함된 모델을 제공합니다. 개인별 최신 캡처·카메라 보정은 새 PC에서 다시 생성해야 합니다.
+
+최종 앱의 사전 검사에는 `python apps/qrover_encoder/web_drive.py --encoder-drive`를 사용하며 모터에 연결하지 않습니다. 실물 설정과 USB/Wi-Fi 실행은 [엔코더 실행 안내](apps/qrover_encoder/README_KO.md)를 따르세요.
 
 ## 기본 지도
 
@@ -73,7 +137,7 @@ $python = ".\.venv\Scripts\python.exe"
 ## 웹에서 PNG 전송
 
 ```powershell
-$webRoot = Join-Path ([Environment]::GetFolderPath('Desktop')) 'ParkingHaeven\Source'
+$webRoot = ".\web\parkinghaeven"
 & $python -m scripts.http_map_server --web-root $webRoot --port 8001
 ```
 
@@ -162,6 +226,18 @@ X·Y·Z를 모두 비우면 카메라 좌표 등록 없이 지도만 생성합�
 웹 아래 패널에 마커 중심 `(x, y)` 픽셀과 영상 방향각을 표시합니다. 원점은 원본 카메라 영상 왼쪽 위, +x 오른쪽·+y 아래, 각도는 오른쪽 0°·시계 방향 양수입니다. 마커를 다시 붙여 전방이 바뀌면 `--marker-front-offset-deg`로 마커 오른쪽 축에서 전방까지의 보정각을 지정하세요. 로버 ID·사전은 `--rover-marker-id`, `--aruco-dictionary`로 지정합니다.
 
 추천 기본 주기는 **100ms(10Hz)**입니다. 원본 해상도의 추적 프레임만 JPEG 품질 **0.92**로 전송하고, 지도 생성은 PNG를 유지합니다. 인코딩·전송·응답 시간을 포함해 다음 요청까지 남은 시간만 기다리며 요청은 중첩하지 않습니다. 새 비디오 프레임이 없으면 전송하지 않습니다. 인코딩만 200ms를 넘긴 프레임은 전송 전에 버립니다. 전송 요청 자체는 1초 제한으로 종료하지만 좌표 유효 시간은 계속 **200ms**입니다. 서버도 촬영 시각과 수신 시각을 모두 확인해 오래된 위치를 비웁니다.
+
+JPEG 생성은 지원 브라우저에서 별도 Worker의 `OffscreenCanvas`로 처리합니다. 원본 프레임의 크기·품질·픽셀 좌표는 유지하며 영상 복사 시작 전부터 압축 완료까지의 시간도 촬영 나이에 포함합니다. Worker 미지원·실패 시 기존 UI 스레드 생성 방식으로 전환하고 패널에 명시합니다. Worker 응답이 늦거나 카메라가 변경되면 해당 프레임은 사용하지 않습니다. 캔버스 크기는 실제 해상도가 바뀔 때만 재설정합니다. 차량 YOLO 추론은 기존의 별도 Worker를 계속 사용합니다.
+
+패널의 **최근 10초 요약**은 1초마다 갱신하며 각 구간의 평균/최댓값을 표시합니다. JPEG 생성 전체, 영상 복사, Worker 시작 대기·그리기·압축, 전송·응답, 서버 처리, cm 수학 변환, 변환 전 지도 검증, 파일 저장을 구별합니다. 유효 응답·만료 응답·전송 전 인코딩 만료 폐기·새 영상 대기 횟수와 브라우저 예약 실행 지연·주 스레드 긴 작업도 함께 봅니다. 압축 콜백까지의 대기 시간이 포함되므로 JPEG 생성 시간이 모두 압축 연산 시간이라는 뜻은 아닙니다. 미검출 등으로 cm 변환을 실행하지 않은 관측은 0ms가 아닌 **미측정**으로 표시합니다.
+
+`POST /api/aruco`에 진단용 `server_timing_ms`(본문 수신·디코딩·추적·추적 파일 저장·도착 처리·전체)와 `arrival_test.timing_ms`(수학 변환·변환 전 지도 검증·도착 파일 저장·전체)를 추가했습니다. 서버 전체는 요청 처리 시작부터 응답 작성 전까지이며 네트워크 왕복이나 브라우저의 응답 처리 대기는 포함하지 않습니다. `GET /api/aruco-debug`에서도 마지막 입력의 `server_timing_ms`, `tracking_timing_ms`, `arrival_timing_ms`를 확인합니다. 도착 상태의 시간은 마지막 관측 처리에 대한 진단이며 GET 조회 시 새 관측으로 갱신하지 않습니다. 기존 위치·좌표·만료 계약은 유지합니다.
+
+CLI 서버는 추적·도착 진단 JSON을 각각 별도 스레드에서 기록합니다. 실시간 위치와 도착 상태는 메모리의 API 결과를 사용하고, 파일 교체·잠금 재시도가 HTTP 응답이나 위치 조회를 기다리게 하지 않습니다. 각 기록기는 기록 중인 스냅샷 외에 **최신 대기 상태 한 개**만 보관하며 밀린 중간 기록은 생략합니다. 한 관측 처리 중의 여러 저장 요청은 최종 상태로 모으고, 같은 만료 상태의 반복 GET은 경과 시간만 갱신하고 다시 저장하지 않습니다. ArUco 검출과 현재 관측 조회의 잠금도 분리해 긴 검출 중에 기존 좌표의 200ms 만료를 확인할 수 있습니다. 검출 결과·cm 보정·안전정지 기준은 바꾸지 않습니다.
+
+응답의 선택 필드 `persistence`와 `arrival_test.persistence`에는 `mode: async_latest`, 대기·기록 여부, 등록/완료 버전, 생략된 중간 기록 수, 마지막 실제 기록 시간(`last_write_ms`), 마지막 오류(`last_error`)를 표시합니다. 저장 오류는 `persistence_warning`과 로그에도 표시하고 기존 파일을 보존합니다. 패널의 **파일 저장·등록(응답 경로)**은 요청이 실제 기다린 시간이며, **별도 기록 최근 소요**는 백그라운드 파일 기록의 마지막 완료 시간입니다. 후자는 현재 프레임의 처리 시간이나 10초 평균이 아닙니다. 파일은 API보다 늦을 수 있고 관측 시각은 기록 완료 시각으로 바꾸지 않으므로, 파일을 직접 읽는 소비자도 원래 촬영·수신 시각으로 만료를 확인해야 합니다. 주행기는 기존 HTTP API를 계속 사용합니다. 프로그램에서 `handler_for()`를 직접 사용하는 경우에는 호환성을 위해 동기 기록이 기본이며, `async_diagnostics=True`로 선택하고 종료 시 반환된 핸들러의 `close_diagnostics()`를 호출합니다.
+
+적용하려면 HTTP 서버를 현재 코드로 재시작한 뒤 웹을 Ctrl+F5로 새로 여세요. 카메라를 시작하고 기존 실측값을 확인한 뒤 로버를 치운 상태에서 맵을 다시 생성합니다. 이후 감시 모드와 도착 테스트를 켜고 진단 요약을 확인하세요. 브라우저 설정과 부하에 따른 실제 개선 폭은 적용 후 측정해야 합니다.
 
 일반 검출이 실패하면 최근 유효 위치 주변을 **원본 2배 확대(`roi_2x`) → 대비 보정 2배 확대 → 전체 대비 보정** 순서로 다시 읽습니다. 실제 이동 누락 영상에서 대비 보정 없이 확대할 때만 복구되는 사례를 확인했습니다. 이전 위치는 검색 영역에만 사용하며 **현재 영상에서 ID를 다시 읽어야** 검출로 인정합니다. 패널에 최근 20프레임의 ID 검출률과 검출 방법을 표시하고 카메라 세션·해상도가 바뀌면 검출률 이력을 초기화합니다. 심한 흔들림·가림으로 실제 무늬를 읽지 못한 프레임에는 현재 좌표를 만들지 않습니다.
 

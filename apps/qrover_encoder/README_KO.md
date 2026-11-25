@@ -1,120 +1,77 @@
-# Q-ROVER 엔코더 주행과 기존 웹 연결
+# Q-ROVER 엔코더 웹 주행 — 최종 App Lab 버전
 
-기존 ParkingHaeven 웹에서 지도 생성·빈칸 선택·ArUco 인식을 수행하고, `web_drive.py`가 선택 경로와 최신 점유·위치를 받아 UNO Q 엔코더 수신 앱으로 전달합니다. 기본 실행은 모터에 연결하지 않는 사전 검사이며 `--drive`로 명시적으로 실행해야 모터를 연결합니다.
+2026-11-25 사용자가 실물 주행 정상 동작을 확인한 App Lab Export를 반영했습니다. 실행 순서는 저장소 [README의 최종 버전 실행 순서](../../README.md#최종-버전-실행-순서--app-lab핫스팟웹캠-1번)를 따릅니다. 실물 확인은 사용자 보고이며 아래 자동 시험과 구분합니다.
 
-이 폴더는 저장소의 `apps/qrover_encoder/`에 포함되어 있습니다. 아래 PowerShell 명령은 모두 저장소 루트에서 실행합니다. 웹과 차량 ONNX는 `web/parkinghaeven/`에 함께 들어 있습니다.
+## 앱 파일과 설정
 
-## 이번 수정
+- `q_rover_encoder_receiver.zip`은 사용자 최종 Export를 반영한 앱입니다. 스케치의 공백만 있는 빈 줄 한 곳만 정리했고 제어 코드는 그대로입니다. 수정 전 Export는 Git 제외 `backups/`에 보관했습니다. App Lab에서 Import한 뒤 Run합니다.
+- `q_rover_encoder_receiver/`의 `app.yaml`, `python/main.py`, `sketch/sketch.ino`, `sketch/sketch.yaml`은 ZIP의 내용과 바이트 단위로 같습니다. ZIP 내부 앱 폴더 이름은 `q-rover-encoder-receiver`입니다.
+- 보드는 Arduino UNO Q이며 HC-020K 상승 에지 입력은 왼쪽 D2·오른쪽 D7, 모터는 왼쪽 D5/D3·오른쪽 D6/D9입니다.
+- 최종 스케치는 왼쪽 극성 `1`, 오른쪽 `-1`, 전진·회전·미세 회전 PWM `150`, `KP=5.0`, 중복 에지 제외 간격 `2000us`를 사용합니다. 다른 하드웨어는 극성과 구동 출력을 다시 확인합니다.
+- ToF는 최종 Export에서 꺼져 있습니다. 해당 앱은 ToF 장애물 자동 정지를 제공하지 않습니다.
+- MCU는 `encoder_step`, `encoder_poll`, `encoder_stop`을 제공합니다. Python 콘솔의 `step / timed_step` 표시는 Python 수신기가 지원하는 메시지 목록이며, 최종 MCU 스케치에는 `timed_step`이 없습니다. 최종 앱과 주행할 때는 반드시 `--encoder-drive`를 사용합니다.
 
-- 실주행은 지도 식별자, 검증된 월드 cm, 좌표축, 출발점·목표점이 있는 경로만 받습니다. `nodes.example.json`은 진단·시뮬레이션용입니다.
-- 출발 전 새 위치 관측 3개가 모두 첫 waypoint에서 3cm 이내인지 확인하며 UNO Q 연결 후 다시 검사합니다.
-- 촘촘한 픽셀 waypoint는 최대 0.2cm 오차로 정리하고 회전점과 방향 반전을 보존합니다. 중간 회전점 허용치는 1cm, 최종 목표 허용치는 2cm이며 관측 판정에는 0.15cm 여유를 둡니다.
-- 현재 경로 구간에서 2cm를 넘겨 이탈하면 정지합니다. 이동은 거리 감소, 회전은 방향 오차 감소로 진행 여부를 판단합니다.
-- 웹 경로의 픽셀 좌표는 동일 캡처의 바닥 Homography로 cm로 바꿉니다. 로버 위치에만 기존 `CapturePose`의 높이 보정을 적용합니다.
-- 주차 방향을 생략하면 진입 방향과 가까우면서 차체가 칸 외곽 안에 들어가는 방향을 찾습니다. `--final-heading-deg`로 직접 지정할 수도 있습니다.
-- 웹 연결에서는 차체 15×19cm와 각 방향 0.5cm 여유를 사용해 전지 경계, 건물, 다른 주차칸, 이동·회전 궤적과 최종 칸 내부 진입을 검사합니다. 정적 경로만 받는 `node_follower.py`의 단독 실행에는 이 시설 외곽 검사가 없으므로 웹 실주행은 `web_drive.py`를 사용하세요.
-- 같은 웹 테스트의 `route_revision` 증가에는 먼저 제동하고 새 위치 3개·새 경로·차체 공간을 검사한 뒤 교체합니다. 새 테스트·조건·지도 변경, 중단, 점유 만료, unknown/occupied, 추적·통신 유실에는 종료하며 자동 재출발하지 않습니다.
-- MCU의 잘못된·중복 작업과 제동 대기 위반도 즉시 제동하고 오류를 유지합니다. MCU 정지 준비 응답이 정상일 때만 TCP 수신을 시작합니다.
+## 웹캠·핫스팟 실행
 
-## 실물 연결 순서
-
-### 1. UNO Q 앱 준비
-
-`q_rover_encoder_receiver/`는 편집할 앱 소스이고, 같은 이름의 ZIP은 App Lab 가져오기 파일입니다. 둘 다 이번 버전으로 갱신했습니다.
-
-배선은 모터 왼쪽 D5/D3, 오른쪽 D6/D9, 엔코더 왼쪽 D2, 오른쪽 D7, 공통 GND입니다. 엔코더는 상승 에지를 세며 초기 모델은 타이어 지름 65mm·20펄스/회전입니다. 센서는 VL53L0X를 전제로 합니다. 실제 장착 부품과 대조하세요.
-
-`q_rover_encoder_receiver/sketch/sketch.ino`의 극성·PWM·KP는 실물 측정 전 초기값입니다. 기존 모터 기본 시험 환경에서 바퀴를 띄워 극성, 펄스와 구동 시작 PWM을 확인하고 직진·회전 값을 측정합니다. 현재 작업 폴더에서 가져온 `WHEEL_TUNING_VERIFIED` 값은 `1`이며 그대로 보존했습니다. 이 값만으로 실물 보정 완료가 증명되지는 않습니다. 실제 보정 전에는 `0`으로 두어 빌드를 차단하고, 측정을 마친 뒤 `1`로 설정합니다. 차체 윤거는 타이어 외곽 폭이 아닌 좌우 바퀴 중심 간 거리입니다.
-
-소스를 수정한 뒤 ZIP을 다시 만듭니다.
+PC와 보드를 같은 핫스팟에 연결합니다. 첫 번째 PowerShell은 저장소 루트에서 웹캠 1번 서버를 실행합니다.
 
 ```powershell
-# 저장소 루트에서 실행
-& .\.venv\Scripts\python.exe -B .\apps\qrover_encoder\package_receiver.py
+.\.venv\Scripts\python.exe -B -X utf8 -m scripts.http_map_server --port 8001 --camera-index 1 --marker-layout assets/maps/parking_map_real_markers.json
 ```
 
-App Lab에서 기존 앱을 정지하고 갱신된 `q_rover_encoder_receiver.zip`을 Import한 뒤 Run합니다. Python 콘솔의 `Q-ROVER ENCODER TCP 8765 | MCU stopped`를 확인합니다. 코드·ZIP을 바꿨으면 이전에 가져온 앱에도 새 버전을 반영해야 합니다.
+App Lab에서 최종 ZIP을 Import하고 Run합니다. [웹](http://localhost:8001)에서 카메라 시작 → 현재 렌즈 위치·마커 높이 입력 → 빈 지도 생성·cm 보정 검증 → 주차칸 경계 저장 → 감시 모드 → 빈칸 선택 → 테스트 시작을 진행합니다. 다른 세션이나 사진의 보정은 재사용하지 않습니다.
 
-### 2. 기존 웹 서버 실행
-
-내장 웹에서는 Python이 카메라와 차량·ArUco 분석을 담당합니다. 카메라 번호는 서버의 `--camera-index`로 선택합니다(기본 0). 브라우저를 최소화해도 아래 주행기가 읽는 API는 Python 관측으로 갱신됩니다. [새 카메라 실행 순서](../../README.md#python-웹캠으로-백그라운드-감시)
-
-첫 번째 PowerShell 창에서 실행합니다. 이미 실행 중이면 기존 서버를 Ctrl+C로 종료한 뒤 다시 실행합니다.
+두 번째 PowerShell에서 보드의 현재 핫스팟 IP를 직접 입력하고 사전 검사합니다. 윤거는 좌우 바퀴 중심 간 거리 15cm 기준입니다.
 
 ```powershell
-# 저장소 루트에서 실행
-& .\.venv\Scripts\python.exe -X utf8 -m scripts.http_map_server --port 8001 --marker-layout assets/maps/parking_map_real_markers.json
+$roverHost = Read-Host '보드의 핫스팟 IP 주소'
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive
 ```
 
-브라우저에서 http://localhost:8001 을 열고 Ctrl+F5로 새로고침합니다.
-
-1. 카메라를 고정하고 전지 A~D와 확인점 E의 실측 좌표를 맞춥니다.
-2. 웹캠을 켜고 렌즈 X·Y·Z와 마커 높이를 현재 실측값으로 입력합니다. 마커 높이 기본값은 10.5cm, 마커 중심과 구동축 중간점의 수평 오프셋은 현재 0cm입니다.
-3. 로버를 치운 빈 지도 PNG로 맵을 생성합니다. **cm 보정 검증 통과 / 카메라 좌표 등록 완료**를 확인합니다.
-4. 주차칸 외곽을 확인·저장하고 감시 모드로 전환해 점유를 갱신합니다. free는 새 관측 3개·2초 이상 확인되어야 하며 관측 TTL은 5초입니다.
-5. ID 7 마커가 부착된 로버를 전지 안 도로에 놓습니다. 중심점뿐 아니라 차체 전체가 전지 안에 있어야 합니다. 실제 주행기의 위치 TTL은 200ms입니다.
-6. 웹의 픽셀 도착 시험 패널에서 조건 또는 빈칸을 선택하고 **테스트 시작**을 누릅니다. 현재 위치에서 칸 중앙으로 향하는 경로와 높이 보정 표시를 확인합니다.
-
-### 3. 모터 연결 없이 사전 검사
-
-두 번째 PowerShell 창에서 실행합니다. 웹이 시작한 현재 테스트를 읽습니다.
+사전 검사는 모터에 연결하지 않습니다. 출발 관측·목적지 ID·중심 좌표·첫 펄스 명령을 확인한 뒤 같은 창에서 실행합니다.
 
 ```powershell
-# 저장소 루트에서 실행
-& .\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive --drive
 ```
 
-목표 칸·경로 버전·최종 방향과 차체·회전 공간 검사 통과를 확인합니다. 기존 저장소의 Python 환경과 `requirements.txt` 의존성을 재사용하며 추가 패키지는 없습니다. clone 폴더 이름이 달라도 상위 저장소를 자동으로 찾습니다. 스크립트만 별도 복사한 경우 `--repo <저장소 절대 경로>`를 지정합니다.
+웹 테스트 중단 또는 주행 터미널 Ctrl+C로 정지합니다. 처음부터 목표 반경 안이면 바퀴를 움직이지 않습니다. 새 테스트를 시작했거나 통신·MCU 오류로 종료됐다면 상태를 확인하고 명령을 다시 실행합니다. `--reference-cm X Y`는 관측 좌표와 실측값의 차이를 표시하며 보정값을 변경하지 않습니다.
 
-이 연결기는 기존 웹 ArUco API를 직접 읽습니다. 별도의 `pose_sender`나 UDP 입력 프로세스는 필요하지 않습니다. 기존 속도 주행기 `src.rover_control.drive`는 종료하고 엔코더 수신 앱을 사용합니다.
+USB는 같은 실행 명령의 `--rover-host "$roverHost"`를 `--usb`로 바꿉니다. ADB에 보드가 나타나야 하며 PATH에 없으면 `--adb <adb.exe 경로>`를 지정합니다. 핫스팟으로만 연결한 보드는 `--rover-host`를 사용합니다.
 
-출발 전에는 기본 최대 10초 동안 안정된 서로 다른 새 위치 관측 3개를 기다립니다. 이 대기 단계에서 미수신·미검출·만료나 일시적인 HTTP 연결 단절·타임아웃이 있으면 관측 묶음을 초기화하고 다시 수집합니다. 시작 중 HTTP 응답은 요청당 최대 0.5초 기다리되 오래된 위치는 받아들이지 않습니다. 같은 프레임을 반복 조회해 준비 완료로 판정하지 않습니다. `--startup-wait-s 20`처럼 최대 대기 시간을 지정할 수 있으며 각 위치의 200ms 유효 시간은 그대로입니다.
+## 추종과 도착
 
-관측 3개가 확인돼 시작 준비가 완료된 뒤에는 기존처럼 미검출·만료·통신 오류 시 종료하고 자동 재개하지 않습니다. 이 단계의 HTTP 제한 시간은 기존 0.12초입니다. 중복 마커, 지도·카메라 불일치, 잘못된 데이터와 HTTP 오류 응답은 시작 대기로 숨기지 않고 즉시 차단합니다. 웹에서 새 프레임 자체가 전송되지 않으면 대기 시간을 늘려도 출발할 수 없습니다.
+실행마다 현재 웹 테스트의 `parking_space_id`를 읽습니다. 높이 보정된 새 ArUco 마커 중심 관측 한 장에서 출발하며, 실제 현재 위치 → 도로 합류 → 연결된 도로 그래프 → 선택한 주차칸 중심 순서로 경로를 만듭니다. 차체 외곽 검사는 웹 주행에 적용하지 않습니다.
 
-### 4. USB 또는 Wi-Fi 실주행
+현재 구간과 앞 8cm 범위에서 진행점을 유지하고 6.5cm 앞을 추종합니다. 45도 이상 코너는 1.5cm 이내 접근까지 목표점을 코너로 제한하고, 통과한 코너를 기록합니다. 전진은 1~5펄스, 회전은 1~2펄스이며 목표 부근에서는 전진을 줄입니다. 현재·앞 구간에서 5cm 이상 이탈하면 관측 위치에서 같은 목적지로 다시 계획합니다.
 
-먼저 바퀴를 띄워 센서 장애물, 통신 끊김, 마커 유실 시 정지를 확인합니다. 바닥 시험은 짧은 직선부터 시작합니다. 아래 `12`는 현재 문서의 윤거 값이며 실제 측정값과 다르면 바꿉니다.
+매 동작 뒤 새 관측 한 장으로 다음 명령을 결정합니다. 같은 프레임을 재사용하지 않습니다. 관측 유효 시간은 촬영 후 200ms이며 마커가 사라지거나 오래되면 제동하고 같은 테스트에서 재관측을 기다립니다. 새 위치가 돌아오면 자동 재개합니다. 웹 Stop·새 테스트·목적지 점유/만료·MCU 고장·통신 오류는 종료 사유입니다.
 
-USB에서는 ADB에 UNO Q가 하나 연결되어 있어야 합니다.
+마커 중심과 목적지 중심의 거리가 기본 2cm 이내인 새 관측 한 장이면 즉시 제동합니다. 최종 방향·차체 겹침·연속 관측 횟수는 요구하지 않습니다. 반경은 사전 검사와 실주행 양쪽에 `--arrival-radius-cm`으로 지정할 수 있습니다. 웹 화면의 성공 표시와 PC 주행기의 cm 도착 판정은 별개이며 터미널의 모터 주행 완료 메시지를 확인합니다.
+
+## 통신과 오류
+
+최종 Python 수신기의 클라이언트 대기는 `TIMEOUT=5.0`, Bridge RPC 대기는 `RPC_TIMEOUT=2.0`입니다. PC의 TCP 연결 대기는 2초, 응답 대기는 1.5초이며 최종 Export를 반영하면서 주행 제어 값은 변경하지 않았습니다. 따라서 PC가 Bridge의 2초 오류 응답보다 먼저 종료될 수 있으며 같은 시각 App Lab Python 콘솔도 확인합니다.
+
+MCU는 2초 heartbeat, 1.5초 엔코더 정체, 6초 작업 제한과 200ms 제동 후 재시작 대기를 사용합니다. 음수 고장은 유지되며 PC에서 무시하거나 자동 재구동하지 않습니다. Bridge UTF-8 오류와 시간 초과의 과거 발생 원인은 확정하지 않았습니다. 사용자 최종 실물 정상 동작 확인과 별도로 이 이력은 남깁니다.
+
+## 소스와 Import ZIP 갱신
+
+소스를 수정했다면 저장소 루트에서 실행합니다. 기존 ZIP은 Git에서 제외한 `backups/`에 보관하고 새 ZIP을 만듭니다.
 
 ```powershell
-& .\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --usb --track-width-cm 12 --drive
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\package_receiver.py
 ```
 
-ADB가 PATH에 없으면 `--adb <adb.exe 절대 경로>`를 추가합니다. Wi-Fi는 같은 네트워크의 UNO Q 실제 IP를 입력합니다.
+새 ZIP은 앱 폴더 이름에 밑줄을 사용하지만 네 소스의 내용은 그대로입니다. App Lab에 이미 Import된 앱에는 자동 반영되지 않으므로 새 ZIP을 Import합니다.
+
+## 자동 검증과 로컬 산출물
 
 ```powershell
-& .\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host <UNO_Q_IP> --track-width-cm 12 --drive
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s apps/qrover_encoder/simulation -p 'test_*.py' -q
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\simulation\check_interfaces.py
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\simulation\check_firmware.py
 ```
 
-이 명령으로 무장한 현재 웹 테스트가 실제 모터 주행과 연결됩니다. 웹 **테스트 중단** 또는 두 번째 터미널 Ctrl+C로 중단할 수 있습니다. 웹에서 새 테스트를 시작하면 주행기는 종료하며 다시 명령을 실행해야 합니다. 같은 테스트 안에서 빈칸 변경으로 경로 버전이 증가하면 제동·재검사 후 교체합니다. 새 경로를 적용할 수 없으면 정지합니다.
+통신 시험은 localhost의 모의 Bridge를 사용합니다. 펌웨어 시험은 C++ 컴파일러로 실제 최종 스케치를 호스트에서 실행하며 Arduino/Bridge/ToF API를 모의 구현합니다. 실제 보드 업로드나 모터 구동은 하지 않습니다. 저장 캡처를 이용하는 일부 주행 시험은 `data/http_map_captures/latest`와 대응 도착 기록이 있는 PC에서 실행하고, 새 clone에는 없으면 skip합니다.
 
-웹의 **성공**은 기존 픽셀 원·두 시점 위치 비교 결과입니다. 모터 주행 완료는 터미널의 **모터 주행 완료: 목표 2cm 이내·최종 방향 확인, 제동 완료**로 확인합니다. 웹이 성공해도 실제 칸 중앙·방향 조건을 충족할 때까지 주행기는 별도 판정합니다. 완료 후에는 주행기 프로세스가 종료합니다.
-
-## 출발이 차단될 때
-
-- 새 지도·카메라 실측값·cm 보정이 없거나 서로 다른 캡처: 같은 웹캠 구도로 맵 생성부터 다시 합니다.
-- 현재 관측이 200ms를 넘음: 실제 ArUco 응답 간격과 YOLO 병행 지연, 마커 크기·조명부터 확인합니다. 유효 시간을 자동으로 늘리지 않습니다.
-- 서버의 도착 JSON 교체에 WinError 5/32/33이 발생하면 짧게 재시도하고, 계속 잠겨 있으면 이전 파일을 보존하며 `arrival_test.persistence_warning`과 서버 경고로 알립니다. 현재 위치·도착 상태는 메모리의 최신 API 값으로 제공하며 위치의 200ms 유효 시간은 유지합니다. 다른 I/O 오류는 연결을 갑자기 끊는 대신 HTTP 503 JSON 오류로 반환합니다. 이 서버 수정을 적용하려면 서버를 재시작해야 합니다.
-- free 없음 또는 만료: 감시 모드의 최신 점유를 확인합니다. unknown을 빈칸으로 바꾸지 않습니다.
-- 차체가 전지 밖: 로버를 더 안쪽 도로에 놓고 웹 테스트를 다시 시작합니다. 현재 저장된 정적 경로의 입구 중심 X는 약 8.16cm라, 길이 19cm 차체를 수평으로 놓으면 일부가 전지 밖으로 나갑니다.
-- 칸 크기·방향 검사 실패: 검출한 칸 외곽과 실제 치수, 카메라 보정부터 대조합니다. 일부 현재 저장 칸은 15×19cm 차체와 여유 폭을 수용하지 못합니다. 물리적으로 작은 칸은 넓혀야 합니다. 이 오류를 없애려고 차체 치수를 줄이지 마세요.
-- MCU 음수 오류: 원인을 해결하고 App Lab Stop → Run합니다. -3 통신 감시, -4 장애물, -5 ToF 만료/무효, -6 작업 시간 초과, -7 잘못된/중복 작업, -8 제동 대기 위반, -9 펄스 정체, -10 좌우 진행 차이입니다.
-
-## 검증과 한계
-
-```powershell
-& .\.venv\Scripts\python.exe -B -m unittest discover -s apps/qrover_encoder/simulation -p 'test_*.py' -v
-& .\.venv\Scripts\python.exe -B apps/qrover_encoder/simulation/check_interfaces.py
-& .\.venv\Scripts\python.exe -B apps/qrover_encoder/simulation/check_firmware.py
-& .\.venv\Scripts\python.exe -B apps/qrover_encoder/simulation/simulate.py
-```
-
-이번 PC 검증은 Python 회귀·루프백 시험 37개와 펌웨어 제어 검사 24개를 통과했습니다. 실제 웹캠·보드·모터를 연결한 검증은 아닙니다.
-
-`check_firmware.py`는 실제 스케치의 제어 코드를 PC C++로 컴파일하며 Arduino 핀·ToF·Bridge API를 모의 구현합니다. g++/clang++ 또는 Visual Studio C++·Windows SDK가 필요합니다. MCU 통신 감시·ToF·작업 시간 초과·펄스 정체·좌우 불균형·오류 유지·제동·P 보정과 미보정 빌드 차단을 검사합니다. UNO Q 대상 보드 빌드와 배선 시험은 별도입니다.
-
-시뮬레이션은 윤거 12/15cm 각각 25개 펄스 위상에서 경로 25/25 성공, 목표점 최대 오차 1.575/1.764cm, 최종 방향 최대 오차 4.349/4.168°를 확인했습니다. 미세 회전 PWM 32 노이즈 시험은 각 150/150 성공입니다. 일부 경로·회전이 실패하면 이제 명령도 실패 종료합니다. 원본 PWM 42 비교군은 실패 사례를 비교하기 위해 유지합니다.
-
-실제 보드 빌드, 실측 엔코더 분해능·PWM·제동거리, 카메라 위치·방향 오차, 연속 실물 주행은 아직 미검증입니다. 단일 채널 엔코더는 역방향과 미끄러짐을 직접 측정하지 못합니다. 차체 검사는 의미 지도에 등록된 시설과 종이 경계를 대상으로 하며, 전면 ToF가 보지 못하는 동적 장애물이나 도로 위 차량 전체를 회피하는 기능은 아닙니다. 실제 도로·주차 공간과 센서 정지 거리를 대조한 뒤 시험하세요.
+사진·보정 JSON·진단 로그는 `.gitignore`로 제외하고 로컬에 보관합니다. 기본 지도 graph/semantic과 입력 이미지·라벨·기준점·모델은 유지합니다. 지도 경로 PNG/JSON과 미리보기는 필요할 때 기존 지도 생성·시각화 명령으로 재생성합니다.

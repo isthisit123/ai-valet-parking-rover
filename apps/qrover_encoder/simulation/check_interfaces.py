@@ -89,18 +89,24 @@ class MapAndPoseTests(unittest.TestCase):
 
 
 class ReceiverTests(unittest.TestCase):
-    def wire(self, fault=0):
+    def wire(self, fault=0, delay=0, stop_delay=0, bridge_failure=False):
         listener = socket.create_server(("127.0.0.1", 0))
         self.addCleanup(listener.close)
         calls, errors = [], []
         def fake_bridge(name, *args, timeout):
             calls.append((name, *args))
-            return {"encoder_step": 1, "encoder_poll": fault, "encoder_stop": 0}[name]
+            if bridge_failure and name in ('encoder_poll', 'encoder_stop'):
+                raise TimeoutError('simulated Bridge timeout')
+            if name == 'timed_step' and delay:
+                time.sleep(delay)
+            if name == 'encoder_stop' and stop_delay:
+                time.sleep(stop_delay)
+            return {"encoder_step": 1, "timed_step": 1, "encoder_poll": fault, "encoder_stop": 0}[name]
         def run():
             with listener.accept()[0] as sock:
                 try:
                     receiver.serve(sock, fake_bridge)
-                except (TimeoutError, ValueError) as error:
+                except (OSError, ValueError, RuntimeError) as error:
                     errors.append(error)
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
@@ -117,10 +123,76 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(calls, [("encoder_step", 2, 1), ("encoder_poll",), ("encoder_stop",)])
         self.assertFalse(errors)
 
+    def test_timed_step_forwards_duration_and_disconnect_brakes(self):
+        client, thread, calls, errors = self.wire()
+        self.assertEqual(client.request("timed_step", mode=2, duration_ms=180), 1)
+        self.assertEqual(client.request("stop"), 0)
+        client.sock.close()
+        thread.join(1)
+        self.assertEqual(calls, [("timed_step", 2, 180), ("encoder_stop",), ("encoder_stop",)])
+        self.assertFalse(errors)
+
+    def test_late_reply_closes_connection_without_resending_stop(self):
+        client, thread, calls, errors = self.wire(delay=1.70)
+        with self.assertRaisesRegex(TimeoutError, '1500ms'):
+            client.request('timed_step', mode=2, duration_ms=120)
+        self.assertEqual(client.sock.fileno(), -1)
+        with self.assertRaisesRegex(ConnectionError, '연결이 종료'):
+            client.request('stop')
+        client.close()
+        thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(calls, [('timed_step', 2, 120), ('encoder_stop',)])
+
+    def test_delayed_stop_and_motion_replies_are_accepted(self):
+        client, thread, calls, errors = self.wire(delay=0.70, stop_delay=0.30)
+        self.assertEqual(client.request('stop'), 0)
+        self.assertEqual(client.request('timed_step', mode=2, duration_ms=120), 1)
+        client.sock.close()
+        thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(calls, [('encoder_stop',), ('timed_step', 2, 120), ('encoder_stop',)])
+
+    def test_bridge_timeout_is_reported_without_masking_it_with_stop_failure(self):
+        client, thread, calls, errors = self.wire(bridge_failure=True)
+        with self.assertRaisesRegex(RuntimeError, '보드 내부 통신 중단: MCU Bridge encoder_poll'):
+            client.request('poll')
+        client.close()
+        thread.join(1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(calls, [('encoder_poll',), ('encoder_stop',)])
+        self.assertIsInstance(errors[0], receiver.MCUBridgeUnavailable)
+
+    def test_connect_timeout_is_distinguished_from_reply_timeout(self):
+        with patch('node_follower.socket.create_connection', side_effect=TimeoutError) as connect:
+            with self.assertRaisesRegex(TimeoutError, 'TCP 연결이 2초'):
+                Rover('test-board')
+        connect.assert_called_once_with(('test-board', 8765), timeout=2.0)
+
+    def test_bad_timed_duration_brakes_without_starting_motor(self):
+        for duration in (0, 39, 201, True, 100.5, "100"):
+            with self.subTest(duration=duration):
+                client, thread, calls, errors = self.wire()
+                with self.assertRaises((ConnectionError, OSError)):
+                    client.request("timed_step", mode=1, duration_ms=duration)
+                thread.join(1)
+                self.assertEqual(calls, [("encoder_stop",)])
+                self.assertIsInstance(errors[0], ValueError)
+
+    def test_timed_job_connection_timeout_brakes(self):
+        client, thread, calls, errors = self.wire()
+        client.request("timed_step", mode=1, duration_ms=180)
+        thread.join(receiver.TIMEOUT + 0.5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(calls[-1], ("encoder_stop",))
+        self.assertIsInstance(errors[0], TimeoutError)
+
     def test_heartbeat_times_out_and_brakes(self):
         client, thread, calls, errors = self.wire()
         client.request("step", mode=1, pulses=5)
-        thread.join(1)
+        thread.join(receiver.TIMEOUT + 0.5)
+        self.assertFalse(thread.is_alive())
         self.assertEqual(calls[-1], ("encoder_stop",))
         self.assertIsInstance(errors[0], TimeoutError)
 

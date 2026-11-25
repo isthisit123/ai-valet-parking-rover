@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from scripts.http_map_server import BUNDLED_WEB_ROOT, handler_for
+from scripts.server_camera import Frame, ServerCamera
 from src.map_processing.map_identity import map_identity
 from test_aruco_tracker import marker_image
 from test_live_parking import write_live_map
@@ -37,6 +38,40 @@ class CameraInput:
 
     def release(self):
         self.released = True
+
+
+class CameraTrackingTimingTest(unittest.TestCase):
+    def test_new_frame_wakes_tracking_after_idle_period(self):
+        observed = threading.Event()
+        tracker = Mock()
+
+        def observe(*args, **kwargs):
+            observed.set()
+            return {"detection_status": "detected"}
+
+        tracker.observe.side_effect = observe
+        camera = ServerCamera(0, None, tracker, Mock(), Mock(), period=.6)
+        image = np.zeros((10, 10, 3), np.uint8)
+        camera.frame = Frame(1, time.monotonic(), "", {}, image)
+        thread = threading.Thread(target=camera._track, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(observed.wait(1))
+            observed.clear()
+            # 분석 주기가 지난 뒤 도착한 프레임을 다음 고정 틱까지 기다리지 않는다.
+            time.sleep(.75)
+            self.assertEqual(tracker.observe.call_count, 1)
+            with camera.frame_changed:
+                camera.frame = Frame(2, time.monotonic(), "", {}, image)
+                camera.frame_changed.notify_all()
+            self.assertTrue(observed.wait(.25), "새 프레임이 분석을 즉시 깨워야 합니다.")
+            self.assertEqual(tracker.observe.call_args.kwargs["frame_id"], "2")
+        finally:
+            camera.stop.set()
+            with camera.frame_changed:
+                camera.frame_changed.notify_all()
+            thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
 
 
 class ServerCameraTest(unittest.TestCase):

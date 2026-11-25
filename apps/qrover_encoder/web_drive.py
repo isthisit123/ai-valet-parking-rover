@@ -1,8 +1,9 @@
-"""기존 ParkingHaeven 웹의 선택·중단·위치·점유 API를 엔코더 주행기에 연결한다.
+"""ParkingHaeven의 목적지·위치·점유 API를 짧은 시간 기반 모터 명령에 연결한다.
 
 기본 실행은 모터에 연결하지 않는 사전 검사다. --drive가 있어야 TCP를 연결한다.
 """
 import argparse
+from contextlib import ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -17,14 +18,16 @@ from urllib.parse import urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import build_opener, ProxyHandler
 
-from node_follower import (CM_PER_PULSE, GOAL_CM, IDENTITY_KEYS, PathGuard, Rover, execute, follow,
-                           load_route, number, require_start_position, settled_pose, simplify_path, wait_settled)
-from vehicle_geometry import VehicleGeometry
+from node_follower import DEFAULT_TRACK_WIDTH_CM, IDENTITY_KEYS, MCUFault, ROVER_REPLY_TIMEOUT_S, Rover, number
+from web_navigation import ARRIVAL_RADIUS_CM, RoadMap, WebPath, position
 
 WEB_TTL_S = 0.20
 STARTUP_WAIT_S = 10.0
 STARTUP_HTTP_TIMEOUT_S = 0.50
 CONTROL_HTTP_TIMEOUT_S = 0.12
+MCU_BRAKE_S = 0.20
+POLL_PERIOD_S = 0.04
+MCU_POLL_S = 0.10
 
 
 class RouteChanged(RuntimeError):
@@ -37,13 +40,22 @@ class WebTransportUnavailable(ConnectionError):
 
 def route_key(state):
     return (state.get('capture_id'), state.get('started_at'), state.get('case_id'),
-            state.get('route_revision'), state.get('parking_space_id'),
-            sha256(json.dumps(state.get('waypoints'), separators=(',', ':')).encode()).hexdigest())
+            state.get('route_revision'), state.get('parking_space_id'))
 
 
-def validate_guidance(state, occupancy, identity, capture_id):
-    if state.get('status') not in ('running', 'holding', 'success') or state.get('guidance_available') is not True:
-        raise RuntimeError('웹 경로 안내가 중단됐습니다. 조건·빈칸·마커 상태를 확인하고 다시 시작하세요.')
+def waiting_for_marker(state):
+    return (state.get('tracking_available') is False and state.get('guidance_available') is False
+            and state.get('status') in ('waiting_for_tracking', 'holding', 'running'))
+
+
+def validate_guidance(state, occupancy, identity, capture_id, *, waiting=False):
+    tracking_wait = waiting and state.get('status') in ('running', 'holding', 'waiting_for_tracking')
+    if not tracking_wait and (state.get('status') not in ('running', 'holding', 'success')
+                              or state.get('guidance_available') is not True):
+        target = state.get('parking_space_id')
+        raise RuntimeError(f"웹 경로 안내가 중단됐습니다. 상태={state.get('status')}, "
+                           f"사유={state.get('reason')}, 목표={target}, "
+                           f"점유={occupancy.get('states', {}).get(target, 'unknown')}")
     if state.get('height_correction_applied') is not True:
         raise ValueError('웹 지도 생성에서 카메라 실측 좌표와 cm 보정을 등록하세요.')
     for data in (state, occupancy):
@@ -72,7 +84,7 @@ class WebFeed:
         self.opener = build_opener(ProxyHandler({}))
         self.lock, self.ready, self.done = threading.Lock(), threading.Event(), threading.Event()
         self.latest, self.error, self.last_pose = None, None, None
-        self.startup_complete, self.pending_generation = False, 0
+        self.startup_complete, self.loss_count = False, 0
         self.pending_reason = '새 ArUco 관측 대기'
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -103,31 +115,35 @@ class WebFeed:
                 if self.settings_path.read_bytes() != self.settings_bytes:
                     raise ValueError('카메라 실측값이 변경됐습니다. 다시 실행하세요.')
                 try:
-                    observation = self.read('/api/rover-pose')
-                    pose = self.converter.convert(observation)
                     occupancy = self.read('/api/parking-occupancy')
-                except (PoseUnavailable, WebTransportUnavailable) as error:
+                    observation = self.read('/api/rover-pose')
+                except WebTransportUnavailable as error:
                     with self.lock:
                         if self.startup_complete:
                             raise
-                        # 시작 대기의 관측·통신 유실은 묶음을 초기화하며 과거 위치를 재사용하지 않는다.
                         self.latest = self.last_pose = None
-                        self.pending_generation += 1
                         self.pending_reason = str(error)
                     self.ready.set()
-                    self.done.wait(max(0, 0.05 - (time.monotonic() - started)))
+                    self.done.wait(0.05)
                     continue
-                if pose is not None:
-                    self.last_pose = pose
-                if self.last_pose is not None:
-                    with self.lock:
-                        self.latest = {'pose': self.last_pose, 'state': observation.get('arrival_test', {}),
-                                       'occupancy': occupancy, 'requested_at': started,
-                                       'client_captured_at': observation.get('client_captured_at')}
-                    self.ready.set()
-                self.done.wait(max(0, 0.05 - (time.monotonic() - started)))
+                try:
+                    pose = self.converter.convert(observation)
+                except PoseUnavailable as error:
+                    if self.last_pose is not None:
+                        self.loss_count += 1
+                    self.last_pose = None
+                    self.pending_reason = str(error)
+                else:
+                    if pose is not None:
+                        self.last_pose = pose
+                with self.lock:
+                    self.latest = {'pose': self.last_pose, 'state': observation.get('arrival_test', {}),
+                                   'occupancy': occupancy, 'requested_at': started, 'loss_count': self.loss_count,
+                                   'client_captured_at': observation.get('client_captured_at')}
+                self.ready.set()
+                self.done.wait(max(0, 0.02 - (time.monotonic() - started)))
         except Exception as error:
-            # 구조·지도·통신 오류와 준비 완료 후 추적 유실은 계속 종료 상태로 유지한다.
+            # 지도·카메라 오류와 주행 중 통신 오류는 종료 상태로 유지한다.
             with self.lock:
                 self.error = error
             self.ready.set()
@@ -138,39 +154,18 @@ class WebFeed:
             raise ValueError('출발 관측 대기 시간은 양수여야 합니다.')
         deadline = time.monotonic() + timeout
         self.thread.start()
-        samples, last_capture, generation = [], -1, -1
-        reason = self.pending_reason
         while time.monotonic() < deadline:
             self.ready.wait(min(0.05, max(0, deadline - time.monotonic())))
             self.ready.clear()
-            with self.lock:
-                observed_generation = self.pending_generation
-                reason = self.pending_reason
-            if generation != observed_generation:
-                samples, last_capture = [], -1
-                generation = observed_generation
-            try:
-                result = self.current()
-            except TimeoutError as error:
-                samples, last_capture = [], -1
-                reason = f'{reason} / {error}'
-                continue
-            pose = result['pose']
-            if pose['captured_monotonic_s'] <= last_capture:
-                continue
-            last_capture = pose['captured_monotonic_s']
-            samples = (samples + [pose])[-3:]
-            stable = settled_pose(samples) if len(samples) == 3 else None
-            if stable is not None:
+            result = self.current()
+            if result and result['pose'] is not None and not waiting_for_marker(result['state']):
                 with self.lock:
-                    if (self.error is not None or self.pending_generation != generation or self.latest is None
-                            or self.latest['pose']['captured_monotonic_s'] != last_capture):
+                    if self.latest is None or self.latest['requested_at'] != result['requested_at']:
                         continue
                     self.startup_complete = True
-                return {**result, 'pose': stable}
-            reason = '안정된 서로 다른 새 위치 관측 3개를 수집 중'
+                return result
         self.done.set()
-        raise TimeoutError(f'{timeout:g}초 안에 안정된 새 위치 3개를 받지 못했습니다. 마지막 상태: {reason}')
+        raise TimeoutError(f'{timeout:g}초 안에 새 ArUco 위치를 받지 못했습니다. 마지막 상태: {self.pending_reason}')
 
     def current(self):
         with self.lock:
@@ -178,22 +173,25 @@ class WebFeed:
                 raise RuntimeError(f'웹 위치·점유 연결 중단: {self.error}') from self.error
             result = deepcopy(self.latest)
         if result is None:
-            raise TimeoutError('현재 웹 위치가 없습니다.')
+            return None
         now = time.monotonic()
-        if not 0 <= now - result['requested_at'] <= WEB_TTL_S:
-            raise TimeoutError('웹 안내 갱신이 200ms를 넘겼습니다.')
-        if not 0 <= now - result['pose']['captured_monotonic_s'] <= WEB_TTL_S:
-            raise TimeoutError('로버 현재 위치가 200ms를 넘겼습니다.')
+        pose = result['pose']
+        result['pose_age_ms'] = (now - pose['captured_monotonic_s']) * 1000 if pose else None
+        result['pose_reason'] = self.pending_reason if pose is None else '새 관측 대기'
+        if (not 0 <= now - result['requested_at'] <= WEB_TTL_S or pose is None
+                or not 0 <= now - pose['captured_monotonic_s'] <= WEB_TTL_S):
+            result['pose'] = None
+            if pose is not None:
+                result['pose_reason'] = f"위치 또는 HTTP 갱신 만료 (관측 나이 {result['pose_age_ms']:.0f}ms)"
         if result.get('client_captured_at'):
             captured = datetime.fromisoformat(result['client_captured_at'].replace('Z', '+00:00'))
             if not -0.05 <= (datetime.now(timezone.utc) - captured).total_seconds() <= WEB_TTL_S:
-                raise TimeoutError('웹캠 촬영 시각이 200ms를 넘겼습니다.')
+                result['pose'] = None
+                result['pose_reason'] = '카메라 촬영 시각 200ms 만료'
         # 조회 이후 경과한 시간도 점유 TTL에 포함한다. 반복 조회로 free 수명을 늘리지 않는다.
-        result['occupancy']['age_seconds'] = number(result['occupancy'].get('age_seconds')) + now - result['requested_at']
+        if result['occupancy'].get('age_seconds') is not None:
+            result['occupancy']['age_seconds'] = number(result['occupancy']['age_seconds']) + now - result['requested_at']
         return result
-
-    def update(self, required=True):
-        return self.current()['pose']
 
     def close(self):
         self.done.set()
@@ -201,83 +199,32 @@ class WebFeed:
             self.thread.join(timeout=0.5)
 
 
-def make_plan(bundle, converter, semantic, final_heading=None):
-    """바닥 픽셀 경로는 바닥 Homography만 적용한다. 마커 높이 보정을 중복 적용하지 않는다."""
-    import numpy as np
-    from src.map_processing.planar_calibration import project_points
-
-    state, occupancy = bundle['state'], bundle['occupancy']
-    capture_id = json.loads(converter.report_bytes)['capture_id']
-    validate_guidance(state, occupancy, converter.identity, capture_id)
-    points = state.get('waypoints')
-    if not isinstance(points, list) or len(points) < 2:
-        raise ValueError('주행할 픽셀 경로가 없습니다.')
-    pixels = np.asarray([[number(x), number(y)] for x, y in points])
-    if (pixels < 0).any() or (pixels >= converter.image_size).any():
-        raise ValueError('픽셀 경로가 같은 캡처의 영상 범위를 벗어났습니다.')
-    matrix = np.linalg.inv(converter.world_to_image)
-    denominators = pixels @ matrix[2, :2] + matrix[2, 2]
-    if (np.abs(denominators) < 1e-9).any() or (denominators > 0).any() and (denominators < 0).any():
-        raise ValueError('보정 경계를 가로지르는 경로는 사용할 수 없습니다.')
-    world = project_points(pixels, matrix)
-    if not np.isfinite(world).all() or (world < 0).any() or (world > converter.paper_size).any():
-        raise ValueError('변환한 경로가 월드 지도 범위를 벗어났습니다.')
-    compact = simplify_path(world.tolist())
-    heading = (math.degrees(math.atan2(compact[-1][1] - compact[-2][1], compact[-1][0] - compact[-2][0]))
-               if final_heading is None else number(final_heading))
-    route = {**converter.identity, 'coordinate_frame': 'world', 'unit': 'cm', 'origin': 'paper_top_left',
-             'axis_directions': {'x': 'right', 'y': 'down'}, 'calibration_verified': True,
-             'waypoints': world.tolist(), 'final_heading_deg': heading,
-             'parking_space_id': state['parking_space_id'], 'route_revision': state['route_revision']}
-    load_route(route, require_verified=True)
-    obstacles, target = [], None
-    for region in semantic['regions']:
-        rid = region['id']
-        is_parking = region.get('type') in ('normal', 'accessible')
-        is_building = str(region.get('role', rid)).startswith('building_')
-        if not is_parking and not is_building:
-            continue
-        polygon = region.get('polygon_px')
-        if not polygon:
-            x, y, width, height = region['bbox']
-            polygon = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]
-        polygon = project_points(polygon, matrix).tolist()
-        if rid == state['parking_space_id']:
-            target = polygon
-        else:
-            # 다른 주차칸은 free 여부와 무관하게 이번 주행의 진입 영역에서 제외한다.
-            obstacles.append((rid, polygon))
-    if target is None:
-        raise ValueError('목표 주차칸의 실제 외곽이 없습니다.')
-    geometry = VehicleGeometry(converter.paper_size.tolist(), obstacles, target)
-    if final_heading is None:
-        heading = geometry.parking_heading(compact[-1], heading)
-        route['final_heading_deg'] = heading
-    geometry.path(compact, bundle['pose']['heading_deg'], heading)
-    return route, geometry
+def make_plan(bundle, roads, radius):
+    goal = roads.parking_center(bundle['state']['parking_space_id'])
+    return WebPath(roads, position(bundle['pose']), goal, radius)
 
 
 def check_revision(bundle, expected, identity, capture_id):
     key = route_key(bundle['state'])
-    # 새 테스트 시작은 별도 주행 허가가 필요하다. 같은 테스트의 경로 변경만 교체한다.
     if key[:3] != expected[:3]:
         raise RuntimeError('웹 지도·테스트·조건이 변경됐습니다. 주행기를 다시 실행하세요.')
+    if key != expected and (type(key[3]) is not int or key[3] <= expected[3]):
+        raise RuntimeError('동일하거나 오래된 route_revision에서 경로가 변경됐습니다.')
+    validate_guidance(bundle['state'], bundle['occupancy'], identity, capture_id,
+                      waiting=bundle['pose'] is None or waiting_for_marker(bundle['state']))
     if key != expected:
-        if type(key[3]) is not int or key[3] <= expected[3]:
-            raise RuntimeError('동일하거나 오래된 route_revision에서 경로가 변경됐습니다.')
         raise RouteChanged('목적지·경로 변경: 제동 후 새 위치와 경로를 검증합니다.')
-    validate_guidance(bundle['state'], bundle['occupancy'], identity, capture_id)
 
 
 def braked_work(rover, work):
-    """공간 검사 중에는 정지 상태로 poll을 유지한다. 다른 명령과 동시에 실행하지 않는다."""
+    """준비 작업 중에는 정지 상태로 poll을 유지한다. 다른 명령과 동시에 실행하지 않는다."""
     done, errors = threading.Event(), []
     def heartbeat():
         try:
             while not done.is_set():
                 if rover.request('poll') != 0:
                     raise RuntimeError('경로 검사 중 MCU가 제동 상태가 아닙니다.')
-                done.wait(0.04)
+                done.wait(MCU_POLL_S)
         except Exception as error:
             errors.append(error)
     thread = threading.Thread(target=heartbeat, daemon=True)
@@ -286,7 +233,7 @@ def braked_work(rover, work):
         result = work()
     finally:
         done.set()
-        thread.join(timeout=0.5)
+        thread.join(timeout=ROVER_REPLY_TIMEOUT_S + 0.2)
     if thread.is_alive():
         raise TimeoutError('제동 상태 확인 응답이 끝나지 않았습니다.')
     if errors:
@@ -294,58 +241,116 @@ def braked_work(rover, work):
     return result
 
 
-def drive_web(feed, converter, semantic, rover, track_width, *, final_heading=None, expected_session=None, log=print):
-    rover.request('stop')
-    replacements = 0
-    while True:
-        pose = wait_settled(feed, rover)
-        bundle = feed.current()
-        session = route_key(bundle['state'])[:3]
-        if expected_session is None:
-            expected_session = session
-        elif session != expected_session:
-            raise RuntimeError('웹 테스트가 변경됐습니다. 주행기를 다시 실행하세요.')
-        bundle['pose'] = pose
-        route, geometry = braked_work(rover, lambda: make_plan(bundle, converter, semantic, final_heading))
-        checked_pose = pose
-        pose = wait_settled(feed, rover)
-        if (math.hypot(pose['x_cm'] - checked_pose['x_cm'], pose['y_cm'] - checked_pose['y_cm']) > 0.5
-                or abs((pose['heading_deg'] - checked_pose['heading_deg'] + 180) % 360 - 180) > 1):
-            raise RuntimeError('공간 검사 중 제동 위치·방향이 바뀌었습니다. 다시 검사하세요.')
-        nodes, heading = load_route(route, require_verified=True)
-        require_start_position(pose, nodes[0])
-        expected = route_key(bundle['state'])
-        capture_id = bundle['state']['capture_id']
+def brake(rover):
+    if rover.request('stop') != 0:
+        raise RuntimeError('MCU 정지 응답을 확인할 수 없습니다.')
 
-        def check(p):
-            check_revision(feed.current(), expected, converter.identity, capture_id)
-            geometry.check((p['x_cm'], p['y_cm']), p['heading_deg'])
 
-        guard = PathGuard(extra=check)
+def drive_web(feed, rover, roads, bundle, path, width, identity, *, encoder_drive=False, log=print):
+    """짧은 동작 사이에 새 관측을 받고, 동작 중에도 중단·도착을 감시한다."""
+    expected = route_key(bundle['state'])
+    capture_id = expected[0]
+    active = paused = rebuild = False
+    last_command_frame = motion_ended = -math.inf
+    loss_count = bundle['loss_count']
+    deadline = math.inf
+    last_wait_log = last_action_log = -math.inf
+    commands = 0
+    next_poll = -math.inf
+    try:
+        while True:
+            # 명령 중에도 웹 Stop·점유·관측 유실·도착을 확인한다.
+            bundle = feed.current()
+            try:
+                check_revision(bundle, expected, identity, capture_id)
+            except RouteChanged:
+                expected = route_key(bundle['state'])
+                brake(rover)
+                active, rebuild = False, True
+                motion_ended = time.monotonic()
+                log('웹 경로 변경: 제동 후 새 목적지로 경로를 계산합니다.', flush=True)
 
-        def step(action):
-            p = feed.update()
-            guard(p)
-            geometry.action(p, action, CM_PER_PULSE, track_width)
-            return execute(rover, feed, action, check=guard)
+            pose = bundle['pose']
+            lost = pose is None or bundle['state'].get('guidance_available') is not True
+            if lost or bundle['loss_count'] != loss_count:
+                if not paused:
+                    brake(rover)
+                    motion_ended = time.monotonic()
+                if time.monotonic() - last_wait_log >= 2:
+                    reason = bundle.get('pose_reason', '새 관측 대기')
+                    log(f'마커 관측 대기: {reason}. 제동 유지.', flush=True)
+                    last_wait_log = time.monotonic()
+                active, paused = False, True
+                loss_count = bundle['loss_count']
+            if not lost:
+                paused = False
+                if rebuild:
+                    path = braked_work(rover, lambda: make_plan(bundle, roads, path.radius))
+                    rebuild = False
+                    if path.arrived(position(pose)):
+                        break
+                    continue
+                if path.arrived(position(pose)):
+                    break
 
+            stamp = pose['captured_monotonic_s'] if not lost else -math.inf
+            if (not active and stamp > max(last_command_frame, motion_ended)
+                    and time.monotonic() - motion_ended >= MCU_BRAKE_S):
+                action = path.encoder_action(pose, width) if encoder_drive else path.action(pose, width)
+                # 그래프 재탐색 사이 도착한 새 관측·중단·만료를 먼저 반영한다.
+                latest = feed.current()
+                if (latest['pose'] is None or latest['pose']['captured_monotonic_s'] != stamp
+                        or latest['loss_count'] != loss_count or route_key(latest['state']) != expected
+                        or latest['state'].get('guidance_available') is not True):
+                    continue
+                validate_guidance(latest['state'], latest['occupancy'], identity, capture_id)
+                sent_at = time.monotonic()
+                age = max(0, (sent_at - stamp) * 1000)
+                if age > WEB_TTL_S * 1000:
+                    continue
+                if encoder_drive:
+                    accepted = rover.request('step', mode=action[0], pulses=action[1])
+                    amount = f'{action[1]}펄스'
+                    execution_timeout = 7.0
+                else:
+                    accepted = rover.request('timed_step', mode=action[0], duration_ms=action[1])
+                    amount = f'{action[1]}ms'
+                    execution_timeout = action[1] / 1000 + 0.5
+                if accepted != 1:
+                    raise RuntimeError('MCU가 모터 작업을 거부했습니다.')
+                reply_ms = (time.monotonic() - sent_at) * 1000
+                commands += 1
+                if time.monotonic() - last_action_log >= 1:
+                    direction = {1: '전진', 2: '시계 회전', 3: '반시계 회전'}[action[0]]
+                    log(f"구동 #{commands}: {direction} {amount}, "
+                        f"위치=({pose['x_cm']:.2f}, {pose['y_cm']:.2f})cm "
+                        f"방향={pose['heading_deg']:.1f}°, 전송 전 관측 나이={age:.0f}ms, "
+                        f"보드 응답={reply_ms:.0f}ms", flush=True)
+                    last_action_log = time.monotonic()
+                active, last_command_frame = True, stamp
+                deadline = sent_at + execution_timeout
+            elif time.monotonic() >= next_poll:
+                state = rover.request('poll')
+                next_poll = time.monotonic() + MCU_POLL_S
+                if active and state == 0:
+                    active = False
+                    motion_ended = time.monotonic()
+                elif active and (state != 1 or time.monotonic() >= deadline):
+                    raise RuntimeError('MCU 모터 작업 응답 또는 완료 시간 오류입니다.')
+                elif not active and state != 0:
+                    raise RuntimeError('MCU가 제동 상태가 아닙니다.')
+            time.sleep(POLL_PERIOD_S)
+    except MCUFault:
+        # 수신기가 이미 고장 제동 후 연결을 종료했다.
+        raise
+    except BaseException:
         try:
-            follow(nodes, heading, track_width, step, pose, path_mode=True, check=guard, log=log)
-            rover.request('stop')
-            actual = feed.update()
-            check_revision(feed.current(), expected, converter.identity, capture_id)
-            if (math.hypot(actual['x_cm'] - nodes[-1][0], actual['y_cm'] - nodes[-1][1]) > GOAL_CM
-                    or abs((actual['heading_deg'] - heading + 180) % 360 - 180) > 5):
-                raise RuntimeError('최종 정지 후 위치·방향이 허용 오차를 벗어났습니다.')
-            geometry.check((actual['x_cm'], actual['y_cm']), actual['heading_deg'], parked=True)
-            log(f'모터 주행 완료: 목표 {GOAL_CM:g}cm 이내·최종 방향 확인, 제동 완료.', flush=True)
-            return
-        except RouteChanged as error:
-            rover.request('stop')
-            replacements += 1
-            if replacements > 10:
-                raise RuntimeError('경로 변경이 10회를 넘었습니다. 점유 상태를 확인하세요.') from error
-            log(str(error), flush=True)
+            brake(rover)
+        except (OSError, ValueError, RuntimeError, KeyError) as stop_error:
+            print(f'중단 후 제동 응답 확인 실패: {stop_error}', file=sys.stderr)
+        raise
+    brake(rover)
+    log(f'모터 주행 완료: 마커 중심이 목표 {path.radius:g}cm 이내, 제동 완료.', flush=True)
 
 
 def default_repo():
@@ -362,19 +367,27 @@ def main():
     parser.add_argument('--server-url', default='http://127.0.0.1:8001')
     parser.add_argument('--capture-dir', type=Path)
     parser.add_argument('--startup-wait-s', type=float, default=STARTUP_WAIT_S,
-                        help='모터 연결 전 안정된 새 위치 3개를 기다릴 최대 시간 (기본 10초)')
+                        help='첫 ArUco 관측을 기다릴 최대 시간 (기본 10초)')
     parser.add_argument('--track-width-cm', type=float)
-    parser.add_argument('--final-heading-deg', type=float, help='생략하면 진입 방향과 가까운 주차 가능한 방향')
+    parser.add_argument('--reference-cm', type=float, nargs=2, metavar=('X', 'Y'),
+                        help='전지 왼쪽 위 기준 실측 마커 중심과 관측값 차이 표시 (사전 검사)')
+    parser.add_argument('--arrival-radius-cm', type=float, default=ARRIVAL_RADIUS_CM, help='마커 중심의 도착 반경 (cm)')
     connection = parser.add_mutually_exclusive_group()
     connection.add_argument('--rover-host', '--host', dest='rover_host')
     connection.add_argument('--usb', action='store_true')
     parser.add_argument('--rover-port', type=int, default=8765)
     parser.add_argument('--adb')
     parser.add_argument('--drive', action='store_true')
+    parser.add_argument('--encoder-drive', action='store_true',
+                        help='기존 ENCODER 수신 앱에 step 명령을 보내 한 펄스씩 주행 (양쪽 엔코더 필요)')
     args = parser.parse_args()
+    if args.reference_cm and (args.drive or not all(math.isfinite(v) for v in args.reference_cm)):
+        parser.error('--reference-cm은 사전 검사에서 유한한 실측값 두 개로 사용하세요.')
     if args.drive and (not (args.rover_host or args.usb) or args.track_width_cm is None):
         parser.error('--drive에는 --usb 또는 --rover-host와 실측 --track-width-cm이 필요합니다.')
-    width = 12 if args.track_width_cm is None else number(args.track_width_cm)
+    width = DEFAULT_TRACK_WIDTH_CM if args.track_width_cm is None else number(args.track_width_cm)
+    if number(args.arrival_radius_cm) <= 0:
+        parser.error('--arrival-radius-cm은 양수여야 합니다.')
     if width <= 0:
         parser.error('--track-width-cm은 양수여야 합니다.')
     if number(args.startup_wait_s) <= 0:
@@ -396,28 +409,46 @@ def main():
     semantic = json.loads((folder / 'semantic.json').read_text(encoding='utf-8'))
     if any(semantic.get(k) != converter.identity[k] for k in ('map_id', *IDENTITY_KEYS)):
         raise ValueError('의미 지도와 위치 보정이 다릅니다.')
-    feed, rover = WebFeed(args.server_url, converter, folder / 'world/camera_position.json'), None
-    try:
-        print(f'출발 전 관측 대기: 최대 {args.startup_wait_s:g}초, 안정된 새 위치 3개가 필요합니다.', flush=True)
-        bundle = feed.start(timeout=args.startup_wait_s)
-        route, _ = make_plan(bundle, converter, semantic, args.final_heading_deg)
-        p = wait_settled(feed, None, initial=True)
-        require_start_position(p, route['waypoints'][0])
-        print(f"목표={route['parking_space_id']} 경로버전={route['route_revision']} "
-              f"최종방향={route['final_heading_deg']:.1f}° 차체·회전 공간 검사 통과", flush=True)
-        if not args.drive:
-            print('사전 검사 완료: 모터에 연결하지 않았습니다. 실물 시험 준비 후 --drive로 실행하세요.')
-            return 0
-        with rover_endpoint(args) as endpoint:
+    roads = RoadMap(semantic, converter)
+    capture_id = json.loads(converter.report_bytes)['capture_id']
+    feed = WebFeed(args.server_url, converter, folder / 'world/camera_position.json')
+    with ExitStack() as stack:
+        stack.callback(feed.close)
+        rover = None
+        if args.drive:
+            endpoint = stack.enter_context(rover_endpoint(args))
+            print(f'보드 {endpoint[0]}:{endpoint[1]} 연결·첫 정지 확인 중', flush=True)
             rover = Rover(*endpoint)
-            drive_web(feed, converter, semantic, rover, width, final_heading=args.final_heading_deg,
-                      expected_session=route_key(bundle['state'])[:3])
-    finally:
-        try:
-            if rover is not None:
-                rover.close()
-        finally:
-            feed.close()
+            stack.callback(rover.close)
+            brake(rover)
+            # MCU 제동 대기와 그래프 준비를 첫 출발 관측보다 먼저 끝낸다.
+            braked_work(rover, lambda: time.sleep(MCU_BRAKE_S))
+        print(f'현재 웹 테스트의 ArUco 위치 대기 (최대 {args.startup_wait_s:g}초)', flush=True)
+        def prepare():
+            bundle = feed.start(timeout=args.startup_wait_s)
+            validate_guidance(bundle['state'], bundle['occupancy'], converter.identity, capture_id)
+            return bundle, make_plan(bundle, roads, args.arrival_radius_cm)
+        bundle, path = braked_work(rover, prepare) if rover else prepare()
+        pose = bundle['pose']
+        mode = '엔코더 step, 전진 1~5펄스·회전 1~2펄스' if args.encoder_drive else '시간 기반 timed_step'
+        print(f'주행 모드: {mode}', flush=True)
+        print(f"ArUco 출발=({pose['x_cm']:.2f}, {pose['y_cm']:.2f})cm 전방={pose['heading_deg']:.1f}° "
+              f"목적지={bundle['state']['parking_space_id']} 중심=({path.goal[0]:.2f}, {path.goal[1]:.2f})cm "
+              f"경로점={len(path.points)} 도착 반경={path.radius:g}cm", flush=True)
+        if args.reference_cm:
+            x, y = args.reference_cm
+            print(f"관측 − 실측: Δx={pose['x_cm'] - x:+.2f}cm, Δy={pose['y_cm'] - y:+.2f}cm", flush=True)
+        if rover:
+            if path.arrived(position(pose)):
+                brake(rover)
+                print('모터 주행 완료: 첫 관측이 도착 반경 안에 있어 제동했습니다.')
+            else:
+                drive_web(feed, rover, roads, bundle, path, width, converter.identity,
+                          encoder_drive=args.encoder_drive)
+        else:
+            first = path.encoder_action(pose, width) if args.encoder_drive else path.action(pose, width)
+            unit = 'pulses' if args.encoder_drive else 'duration_ms'
+            print(f'사전 검사 완료: 첫 명령(mode, {unit})={first or "정지"}. 모터 연결 없음.')
     return 0
 
 

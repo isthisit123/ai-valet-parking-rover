@@ -64,11 +64,14 @@ class NavigationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'wall'):
             geometry.check((25, 25), 0)
 
-    def test_turn_sweep_and_small_parking_are_rejected(self):
+    def test_parking_requires_center_in_target(self):
         target = [(15, 15), (25, 15), (25, 25), (15, 25)]
         geometry = VehicleGeometry([100, 100], target=target)
-        with self.assertRaises(ValueError):
-            geometry.check((20, 20), 0, parked=True)
+        geometry.check((20, 20), 0, parked=True)
+        with self.assertRaisesRegex(ValueError, '로버 중심'):
+            geometry.check((26, 20), 0, parked=True)
+
+    def test_turn_sweep_stays_on_paper(self):
         geometry = VehicleGeometry([100, 100])
         geometry.check((10, 20), 90)
         with self.assertRaises(ValueError):

@@ -81,6 +81,7 @@ class ServerCamera:
         self.tracker, self.arrival, self.parking = tracker, arrival, parking
         self.lifecycle = threading.RLock()
         self.lock = threading.RLock()
+        self.frame_changed = threading.Condition(self.lock)
         self.monitor_lock = threading.RLock()
         self.stop = threading.Event()
         self.ready = threading.Event()
@@ -163,6 +164,7 @@ class ServerCamera:
                 number += 1
                 with self.lock:
                     self.frame = Frame(number, stamp, at, source, image)
+                    self.frame_changed.notify_all()
                     self.ready.set()
         finally:
             cap.release()
@@ -170,19 +172,25 @@ class ServerCamera:
     def _track(self):
         previous = 0
         while not self.stop.is_set():
-            start = time.monotonic()
-            with self.lock:
+            with self.frame_changed:
+                self.frame_changed.wait_for(
+                    lambda: self.stop.is_set() or (self.frame is not None and self.frame.number != previous),
+                    timeout=.1)
+                if self.stop.is_set():
+                    return
                 frame = self.frame
-            if frame is not None and frame.number != previous:
-                previous = frame.number
-                pose = self.tracker.observe(frame.image, received_monotonic_s=frame.stamp,
-                                            client_captured_at=frame.captured_at, frame_id=str(frame.number),
-                                            camera_source=frame.source)
-                self.arrival.observe(pose)
-                with self.lock:
-                    self.tracked = (frame, pose)
-                    if pose["detection_status"] != "detected":
-                        self.miss = self.tracked
+            if frame is None or frame.number == previous:
+                continue
+            start = time.monotonic()
+            previous = frame.number
+            pose = self.tracker.observe(frame.image, received_monotonic_s=frame.stamp,
+                                        client_captured_at=frame.captured_at, frame_id=str(frame.number),
+                                        camera_source=frame.source)
+            self.arrival.observe(pose)
+            with self.lock:
+                self.tracked = (frame, pose)
+                if pose["detection_status"] != "detected":
+                    self.miss = self.tracked
             self.stop.wait(max(.001, self.period - (time.monotonic()-start)))
 
     def diagnostic(self, miss):

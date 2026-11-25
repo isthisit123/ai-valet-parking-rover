@@ -17,6 +17,7 @@ WORLD_AXES = {"x": "right", "y": "down"}
 START_RADIUS_CM = 3.0
 IDENTITY_KEYS = ("map_image_sha256", "id_assignment_revision")
 POSE_AGE = 0.20
+ROVER_REPLY_TIMEOUT_S = 1.5
 GOAL_CM = 2.0
 CORNER_CM = 1.0
 MAX_TRACK_ERROR_CM = 2.0
@@ -169,24 +170,52 @@ class Poses:
         self.sock.close()
 
 
+class MCUFault(RuntimeError):
+    """음수 상태를 반환하면 MCU는 제동 상태를 유지하고 수신기는 연결을 닫는다."""
+
+
 class Rover:
     def __init__(self, host, port=8765):
-        self.sock = socket.create_connection((host, port), timeout=0.15)
-        self.sock.settimeout(0.15)
+        # 무장 전 TCP 연결은 핫스팟의 초기 연결 지연을 허용한다.
+        try:
+            self.sock = socket.create_connection((host, port), timeout=2.0)
+        except TimeoutError as error:
+            raise TimeoutError(f'보드 {host}:{port} TCP 연결이 2초 안에 완료되지 않았습니다.') from error
+        self.sock.settimeout(ROVER_REPLY_TIMEOUT_S)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.seq = 0
         self.buffer = bytearray()
 
     def request(self, kind, **kwargs):
+        if self.sock.fileno() == -1:
+            raise ConnectionError('보드 연결이 종료돼 추가 명령을 전송할 수 없습니다.')
+        try:
+            return self._request(kind, **kwargs)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            # 응답을 놓친 연결에 다음 명령을 보내면 이전 seq 응답을 잘못 읽게 된다.
+            # 연결을 닫으면 수신기의 finally와 MCU 자체 시간 제한이 제동한다.
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.sock.close()
+            raise
+
+    def _request(self, kind, **kwargs):
+        timeout = ROVER_REPLY_TIMEOUT_S
         self.seq += 1
+        deadline = time.monotonic()+timeout
+        self.sock.settimeout(timeout)
         self.sock.sendall(json.dumps(dict(type=kind, seq=self.seq, **kwargs)).encode()+b'\n')
-        deadline = time.monotonic()+0.15
         while b'\n' not in self.buffer:
             remaining = deadline-time.monotonic()
             if remaining <= 0:
-                raise TimeoutError('rover reply expired')
+                raise TimeoutError(f'보드 {kind} 응답이 {timeout*1000:g}ms 안에 도착하지 않았습니다.')
             self.sock.settimeout(remaining)
-            chunk = self.sock.recv(2048)
+            try:
+                chunk = self.sock.recv(2048)
+            except TimeoutError as error:
+                raise TimeoutError(f'보드 {kind} 응답이 {timeout*1000:g}ms 안에 도착하지 않았습니다.') from error
             if not chunk:
                 raise ConnectionError('rover closed connection')
             self.buffer.extend(chunk)
@@ -194,13 +223,20 @@ class Rover:
                 raise ValueError('oversized reply')
         line, _, self.buffer = self.buffer.partition(b'\n')
         reply = json.loads(line)
+        if reply.get('seq') == self.seq and isinstance(reply.get('error'), str):
+            raise RuntimeError(f"보드 내부 통신 중단: {reply['error']}")
         if reply['seq'] != self.seq or type(reply['state']) is not int:
             raise ValueError('invalid reply')
         if reply['state'] < 0:
-            raise RuntimeError(f"MCU fault {reply['state']}; check README; restart app after repair")
+            code = reply['state']
+            details = {-4: '전방 ToF 장애물 감지', -5: '전방 ToF 거리 측정 무효 또는 만료 (150ms)'}
+            self.sock.close()
+            raise MCUFault(f"MCU fault {code} ({kind}): {details.get(code, '엔코더 수신 앱의 고장 코드 확인')}")
         return reply['state']
 
     def close(self):
+        if self.sock.fileno() == -1:
+            return
         try:
             self.request('stop')
         except (OSError, ValueError, RuntimeError, KeyError) as error:
@@ -267,12 +303,16 @@ def execute(rover, poses, action, *, check=None):
     raise TimeoutError('step execution expired')
 
 
-def segment_distance(point, start, end):
+def projected_point(point, start, end, lookahead_cm=0.0):
     dx, dy = end[0] - start[0], end[1] - start[1]
     length2 = dx * dx + dy * dy
     along = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length2 if length2 else 0
-    fraction = min(1.0, max(0.0, along))
-    return math.hypot(point[0] - start[0] - fraction * dx, point[1] - start[1] - fraction * dy)
+    fraction = min(1.0, max(0.0, along) + (lookahead_cm / math.sqrt(length2) if length2 else 0))
+    return start[0] + fraction * dx, start[1] + fraction * dy
+
+
+def segment_distance(point, start, end):
+    return math.dist(point, projected_point(point, start, end))
 
 
 def simplify_path(points, tolerance=SIMPLIFY_CM):
@@ -299,24 +339,30 @@ def simplify_path(points, tolerance=SIMPLIFY_CM):
     return [points[i] for i in sorted(kept)]
 
 
+class PathDeviation(RuntimeError):
+    pass
+
+
 class PathGuard:
-    def __init__(self, extra=None):
+    def __init__(self, extra=None, max_error_cm=MAX_TRACK_ERROR_CM):
         self.segment = None
         self.extra = extra
+        self.max_error_cm = max_error_cm
 
     def __call__(self, pose, segment=None):
         if segment is not None:
             self.segment = segment
         if self.segment is not None:
             positions = [(pose['x_cm'], pose['y_cm']), *pose.get('position_samples', [])]
-            if any(segment_distance(p, *self.segment) > MAX_TRACK_ERROR_CM for p in positions):
-                raise RuntimeError('현재 경로 구간에서 2cm 이상 이탈했습니다. 수동 재시작하세요.')
+            distance = max(segment_distance(p, *self.segment) for p in positions)
+            if distance > self.max_error_cm:
+                raise PathDeviation(f'현재 경로 구간에서 {distance:.2f}cm 이탈했습니다 (허용 {self.max_error_cm:g}cm).')
         if self.extra:
             self.extra(pose)
 
 
 def follow(nodes, final_heading, track_width, execute_action, pose, *, clock=time.monotonic,
-           log=print, path_mode=False, check=None):
+           log=print, path_mode=False, check=None, recover=None):
     if path_mode:
         nodes = simplify_path(nodes)
         targets = nodes[1:]
@@ -333,6 +379,8 @@ def follow(nodes, final_heading, track_width, execute_action, pose, *, clock=tim
         while True:
             if check:
                 check(pose, (nodes[i], target) if path_mode else None)
+            if recover is not None:
+                pose = recover(pose, (nodes[i], target))
             action, distance, error = plan(pose, target, track_width, heading, goal_cm=goal_cm)
             log(f'node={i+1} d={distance:.2f}cm errorCW={error:+.2f}deg job={action}', flush=True)
             if action is None:

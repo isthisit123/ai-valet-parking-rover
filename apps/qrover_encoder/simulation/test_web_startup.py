@@ -1,4 +1,4 @@
-"""출발 대기의 일시적 유실 복구와 준비 완료 후 유실 종료를 검증한다."""
+"""단일 출발 관측, 추적 재개와 통신 단절 제동를 검증한다."""
 from pathlib import Path
 from http.client import RemoteDisconnected
 import sys
@@ -58,7 +58,8 @@ class WebStartupTest(unittest.TestCase):
             status = 'lost' if feed.lost.is_set() else states[min(feed.pose_reads - 1, len(states) - 1)]
             if isinstance(status, Exception):
                 raise status
-            return {'tracking_status': status, 'frame_id': feed.pose_reads,
+            return {'tracking_status': status, 'detection_status': 'detected' if status == 'stale' else status,
+                    'frame_id': feed.pose_reads,
                     'captured_monotonic_s': first_stamp if repeat else time.monotonic(),
                     'x_cm': 20, 'y_cm': 20, 'heading_deg': 90, 'arrival_test': {}}
 
@@ -69,14 +70,9 @@ class WebStartupTest(unittest.TestCase):
         feed = self.feed(['not_started', 'lost', 'stale', 'detected', 'detected', 'detected'])
         result = feed.start(timeout=1)
         self.assertTrue(feed.startup_complete)
-        self.assertGreaterEqual(result['pose']['frame_id'], 6)
-        self.assertEqual(result['pose']['position_samples'], [(20, 20)] * 3)
+        self.assertEqual(result['pose']['frame_id'], 4)
+        self.assertNotIn('position_samples', result['pose'])
         self.assertIsNone(feed.error)
-
-    def test_loss_resets_partly_collected_startup_observations(self):
-        feed = self.feed(['detected', 'detected', 'lost', 'detected', 'detected', 'detected'])
-        result = feed.start(timeout=1)
-        self.assertGreaterEqual(result['pose']['frame_id'], 6)
 
     def test_permanent_loss_times_out_and_never_becomes_ready(self):
         feed = self.feed(['lost'])
@@ -85,14 +81,16 @@ class WebStartupTest(unittest.TestCase):
             feed.start(timeout=0.2)
         self.assertLess(time.monotonic() - started, 0.8)
         self.assertFalse(feed.startup_complete)
-        self.assertIsNone(feed.latest)
+        self.assertIsNone((feed.latest or {}).get("pose"))
         self.assertTrue(feed.done.is_set())
 
-    def test_one_repeated_frame_cannot_complete_startup(self):
+    def test_first_frame_starts_but_duplicate_cannot_refresh_pose(self):
         feed = self.feed(['detected'], repeat=True)
-        with self.assertRaises(TimeoutError):
-            feed.start(timeout=0.3)
-        self.assertFalse(feed.startup_complete)
+        first = feed.start(timeout=0.3)
+        self.assertEqual(first['pose']['frame_id'], 1)
+        time.sleep(0.24)
+        self.assertIsNone(feed.current()['pose'])
+        self.assertIsNone(feed.error)
 
     def test_ambiguous_marker_is_fatal_without_startup_retry(self):
         feed = self.feed(['ambiguous', 'detected'])
@@ -107,18 +105,20 @@ class WebStartupTest(unittest.TestCase):
             feed.start(timeout=1)
         self.assertEqual(feed.pose_reads, 0)
 
-    def test_loss_after_startup_latches_and_never_auto_resumes(self):
+    def test_loss_after_startup_publishes_state_then_recovers(self):
         feed = self.feed(['detected'])
-        feed.start(timeout=1)
+        first = feed.start(timeout=1)
         feed.lost.set()
-        feed.thread.join(timeout=0.5)
-        self.assertFalse(feed.thread.is_alive())
-        self.assertIsInstance(feed.error, PoseUnavailable)
-        with self.assertRaises(RuntimeError):
-            feed.current()
+        deadline = time.monotonic() + 1
+        while feed.current()['pose'] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(feed.current()['pose'])
+        self.assertTrue(feed.thread.is_alive())
         feed.lost.clear()
-        with self.assertRaises(RuntimeError):
-            feed.current()
+        while not feed.current()['pose'] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreater(feed.current()['pose']['frame_id'], first['pose']['frame_id'])
+        self.assertEqual(feed.current()['loss_count'], 1)
 
     def test_invalid_timeout_does_not_start_the_reader(self):
         feed = self.feed(['detected'])
@@ -131,7 +131,7 @@ class WebStartupTest(unittest.TestCase):
         feed = self.feed([WebTransportUnavailable('연결 닫힘'), WebTransportUnavailable('시간 초과'),
                           'detected', 'detected', 'detected'])
         result = feed.start(timeout=1)
-        self.assertGreaterEqual(result['pose']['frame_id'], 5)
+        self.assertEqual(result['pose']['frame_id'], 3)
         self.assertTrue(feed.startup_complete)
 
     def test_permanent_transport_failure_is_bounded_by_startup_timeout(self):
@@ -139,7 +139,7 @@ class WebStartupTest(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, '시간 초과'):
             feed.start(timeout=0.2)
         self.assertFalse(feed.startup_complete)
-        self.assertIsNone(feed.latest)
+        self.assertIsNone((feed.latest or {}).get("pose"))
 
     def test_transport_failure_after_ready_remains_latched(self):
         feed = self.feed(['detected'])

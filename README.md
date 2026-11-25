@@ -1,6 +1,37 @@
 # Q-ROVER — AI Valet Parking Rover
 
-지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 점유·선택 경로·위치를 직접 받아 UNO Q에 연결하며, 경로 변경 시 제동·재검사를 수행합니다. 자동·모의 시험을 통과했고 실제 보드·카메라·모터 주행 검증은 [로드맵](docs/ROADMAP.md)에 남아 있습니다.
+지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 목적지·점유·ArUco 위치를 받아 UNO Q에 연결합니다. 2026-11-25 사용자가 실물 주행 정상 동작을 확인했으며, 해당 App Lab Export와 소스를 최종 수신 앱으로 반영했습니다. 상세 검증 기록은 [로드맵](docs/ROADMAP.md)에 있습니다.
+
+## 최종 버전 실행 순서 — App Lab·핫스팟·웹캠 1번
+
+명령은 저장소 루트의 PowerShell에서 실행합니다. 처음 받았다면 아래 **설치 및 지도 생성**의 가상환경·의존성 설치를 먼저 진행합니다. PC와 UNO Q를 같은 핫스팟에 연결하고, 보드의 현재 IP는 App Lab에서 확인합니다. 개인 핫스팟 IP·SSID·비밀번호는 저장소에 기록하지 않습니다.
+
+1. **App Lab 앱 준비 및 Run.** `apps/qrover_encoder/q_rover_encoder_receiver.zip`을 Import하고 **Q-ROVER Encoder Receiver**를 엽니다. 이 ZIP과 `apps/qrover_encoder/q_rover_encoder_receiver/` 소스는 최종 Export의 같은 버전입니다. Run 후 Python 콘솔의 `Q-ROVER TCP 8765 | MCU stopped | step / timed_step`를 확인합니다. 기존에 가져온 앱은 저장소 파일을 바꿔도 자동 갱신되지 않으므로 최종 ZIP을 다시 Import합니다.
+2. **첫 번째 PowerShell에서 웹 서버 실행.** 외장 웹캠 번호가 1인 환경의 명령입니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m scripts.http_map_server --port 8001 --camera-index 1 --marker-layout assets/maps/parking_map_real_markers.json
+```
+
+3. **웹에서 지도와 목적지 준비.** [ParkingHaeven](http://localhost:8001)을 열고 카메라 시작 → 현재 렌즈 위치·마커 높이 입력 → 로버를 치운 빈 지도 PNG 전송·맵 생성 → cm 보정 검증 → 주차칸 경계 확인·저장 → 감시 모드 순서로 진행합니다. 마커가 보이는 로버를 놓고 원하는 빈칸을 직접 선택한 뒤 **테스트 시작**을 누릅니다. 실행마다 현재 테스트의 `parking_space_id`를 읽으므로 특정 주차칸을 코드에 고정하지 않습니다.
+4. **두 번째 PowerShell에서 보드 주소 입력 및 사전 검사.** 실측 윤거는 좌우 바퀴 중심 간 거리 15cm입니다. 아래 사전 검사는 보드에 연결하거나 모터 명령을 보내지 않습니다.
+
+```powershell
+$roverHost = Read-Host '보드의 핫스팟 IP 주소'
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive
+```
+
+5. **같은 PowerShell에서 실주행.** 목적지 ID·중심 좌표와 관측된 출발점을 확인한 뒤 실행합니다. 최종 MCU는 엔코더 `step` 방식이므로 `--encoder-drive`를 포함합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\web_drive.py --rover-host "$roverHost" --track-width-cm 15 --encoder-drive --drive
+```
+
+6. **정지 및 다음 실행.** 웹 **테스트 중단** 또는 주행 터미널 **Ctrl+C**로 정지합니다. 마커가 잠시 사라지면 제동한 채 기다리고 같은 테스트의 새 관측에서 자동 재개합니다. 마커 중심이 목표 중심의 기본 2cm 반경에 들어오면 방향과 무관하게 정지합니다. 새 테스트를 시작했거나 통신·MCU 오류로 종료됐다면 원인을 확인하고 실주행 명령을 다시 실행합니다.
+
+최종 앱은 HC-020K 엔코더 D2/D7, 모터 D5/D3·D6/D9, 왼쪽 극성 `1`·오른쪽 `-1`, PWM `150`을 사용합니다. ToF는 최종 Export에서 비활성화되어 장애물 자동 정지를 제공하지 않습니다. 배선·극성·전원 설정은 해당 실물 환경 기준입니다. USB/ADB 연결과 상세 동작은 [수신 앱 안내](apps/qrover_encoder/README_KO.md)를 참고하세요.
+
+실행 중 생성되는 카메라 사진·보정 JSON·진단 로그는 PC에 남으며 Git에서 제외합니다. 기본 지도 입력·기준점·graph/semantic·차량 ONNX 모델은 배포에 포함합니다. 새 PC에서는 현재 카메라 세션으로 지도 생성과 보정을 다시 수행합니다.
 
 ## Python 웹캠으로 백그라운드 감시
 
@@ -19,6 +50,8 @@
 .\.venv\Scripts\python.exe -X utf8 -m scripts.diagnose_aruco_tracking --label stationary --duration 30 --output-dir data/rover_runs/aruco/background_check
 ```
 
+카메라 프레임이 분석 목표 주기보다 느리면 새 프레임 도착 알림으로 ArUco 분석을 시작합니다. 프레임이 없는 동안 분석 주기를 반복 대기하며 생기는 추가 지연을 줄이고, 빠른 카메라에서는 설정된 분석 주기를 적용합니다. 적용하려면 서버를 재시작하고 새 카메라 세션으로 지도를 다시 생성하세요.
+
 이미지·동영상 파일은 기존 웹 입력을 사용합니다. 브라우저 웹캠과 JPEG 업로드 방식을 쓰려면 `--camera-index` 대신 `--browser-camera`를 지정합니다. 아래 문서의 브라우저 JPEG Worker·인코딩 지연 안내는 이 모드에 해당합니다. 외부 `--web-root`의 기존 웹도 브라우저 입력을 사용합니다.
 
 ## 다른 PC에서 받기
@@ -31,7 +64,7 @@
 
 [localhost:8001](http://localhost:8001)에서 카메라를 시작합니다. Python 카메라 모드에서는 감시를 시작할 때 서버가 차량 모델을 로드하고 실패 원인은 화면에 표시합니다. 웹 스타일과 브라우저 입력용 ONNX Runtime Web 1.22.0은 기존 CDN을 사용합니다. `--web-root`로 별도 웹을 지정해도 해당 폴더에 `parking_cars.onnx`가 없으면 포함된 모델을 제공합니다. 개인별 최신 캡처·카메라 보정은 새 PC에서 다시 생성해야 합니다.
 
-엔코더 연결의 기본 명령은 `python apps/qrover_encoder/web_drive.py`이며 모터 없이 사전 검사합니다. 실물 설정과 USB/Wi-Fi 실행은 [엔코더 실행 안내](apps/qrover_encoder/README_KO.md)를 따르세요.
+최종 앱의 사전 검사에는 `python apps/qrover_encoder/web_drive.py --encoder-drive`를 사용하며 모터에 연결하지 않습니다. 실물 설정과 USB/Wi-Fi 실행은 [엔코더 실행 안내](apps/qrover_encoder/README_KO.md)를 따르세요.
 
 ## 기본 지도
 

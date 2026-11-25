@@ -2,11 +2,39 @@
 
 지도 사진에서 주차칸과 도로를 찾고, 빈칸까지 경로를 계산해 Q-ROVER에 전달합니다. **로컬·HTTP PNG → OCR 힌트 → 의미 지도 → 조건별 경로**와 검증된 cm 경로·ArUco 위치 변환을 구현했습니다. [엔코더 주행기](apps/qrover_encoder/README_KO.md)는 웹의 최신 목적지·점유·ArUco 위치를 받아 UNO Q에 연결합니다. 2026-11-25 사용자가 실물 주행 정상 동작을 확인했으며, 해당 App Lab Export와 소스를 최종 수신 앱으로 반영했습니다. 상세 검증 기록은 [로드맵](docs/ROADMAP.md)에 있습니다.
 
+| 문서 | 내용 |
+| --- | --- |
+| 이 README | 처음 설치, App Lab Import, 웹캠·핫스팟 실행, 목적지 선택과 주행 |
+| [수신 앱 안내](apps/qrover_encoder/README_KO.md) | 최종 앱 파일, 배선·PWM, 추종·정지 조건, 통신 오류와 시험 명령 |
+| [발표용 기술 가이드](docs/PRESENTATION_TECHNOLOGY.md) | 종이 지도·ONNX 차량 인식부터 좌표 보정, 목적지 재선택, 엔코더 주행까지의 원리와 코드 |
+| [팀 통합 가이드](docs/TEAM_GUIDE.md) | 지도 ID·좌표계·API와 최종 엔코더 통신 계약 |
+| [로드맵](docs/ROADMAP.md) | 최종 완료 상태, 실제 확인 범위와 남은 한계 |
+| [개발 이력·인수인계](docs/PROJECT_HANDOFF.md) | 이전 설계, 회차별 검증과 과거 계획 |
+
 ## 최종 버전 실행 순서 — App Lab·핫스팟·웹캠 1번
 
-명령은 저장소 루트의 PowerShell에서 실행합니다. 처음 받았다면 아래 **설치 및 지도 생성**의 가상환경·의존성 설치를 먼저 진행합니다. PC와 UNO Q를 같은 핫스팟에 연결하고, 보드의 현재 IP는 App Lab에서 확인합니다. 개인 핫스팟 IP·SSID·비밀번호는 저장소에 기록하지 않습니다.
+Windows PC에 Python(`py` 명령), Git, Arduino App Lab을 준비합니다. 명령은 저장소 루트의 PowerShell에서 실행합니다. PC와 UNO Q를 같은 핫스팟에 연결하고 App Lab에서 해당 보드를 선택합니다. 보드의 현재 IP는 App Lab에서 확인하며 개인 핫스팟 IP·SSID·비밀번호는 저장소에 기록하지 않습니다.
 
-1. **App Lab 앱 준비 및 Run.** `apps/qrover_encoder/q_rover_encoder_receiver.zip`을 Import하고 **Q-ROVER Encoder Receiver**를 엽니다. 이 ZIP과 `apps/qrover_encoder/q_rover_encoder_receiver/` 소스는 최종 Export의 같은 버전입니다. Run 후 Python 콘솔의 `Q-ROVER TCP 8765 | MCU stopped | step / timed_step`를 확인합니다. 기존에 가져온 앱은 저장소 파일을 바꿔도 자동 갱신되지 않으므로 최종 ZIP을 다시 Import합니다.
+**0. 처음 한 번 — 저장소 받기와 requirements 설치.** 아직 저장소가 없다면 원하는 작업 폴더의 PowerShell에서 아래 두 줄을 실행합니다. 이미 받은 폴더가 있다면 그 폴더에서 다음 설치 명령부터 진행합니다.
+
+```powershell
+git clone https://github.com/isthisit123/ai-valet-parking-rover.git
+cd ai-valet-parking-rover
+```
+
+웹 서버·카메라·주행기는 `.venv`에, 웹 지도 생성에 필요한 OCR은 `.venv-ocr`에 설치합니다. **웹에서 새 지도를 만들려면 두 requirements 파일을 모두 설치해야 합니다.** 두 환경은 OpenCV 의존성을 분리하므로 하나로 합치지 않습니다.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -X utf8 -m pip install -r requirements.txt
+
+.\.venv\Scripts\python.exe -m venv .venv-ocr
+.\.venv-ocr\Scripts\python.exe -X utf8 -m pip install -r requirements-ocr.txt
+```
+
+이 명령은 PC Python 환경을 준비합니다. App Lab 앱은 다음 단계에서 보드에 Import·Run합니다. 아래 명령은 Python 실행 파일을 직접 지정하므로 가상환경 활성화나 PowerShell 실행 정책 변경은 필요하지 않습니다. 웹 서버와 주행기를 실행하는 각 PowerShell 창도 저장소 루트에서 시작합니다.
+
+1. **App Lab 앱 준비 및 Run.** App Lab의 앱 가져오기(Import) 기능에서 **저장소 안의 `apps/qrover_encoder/q_rover_encoder_receiver.zip` 파일**을 선택하고 **Q-ROVER Encoder Receiver**를 엽니다. ZIP을 풀어서 개별 `main.py`를 가져오는 방식이 아닙니다. 이 ZIP과 `apps/qrover_encoder/q_rover_encoder_receiver/` 소스는 최종 Export의 같은 버전입니다. Run 후 Python 콘솔의 `Q-ROVER TCP 8765 | MCU stopped | step / timed_step`를 확인하고 앱을 실행 상태로 둡니다. 기존에 가져온 앱은 저장소 파일을 바꿔도 자동 갱신되지 않으므로 최종 ZIP을 다시 Import합니다.
 2. **첫 번째 PowerShell에서 웹 서버 실행.** 외장 웹캠 번호가 1인 환경의 명령입니다.
 
 ```powershell
@@ -32,6 +60,36 @@ $roverHost = Read-Host '보드의 핫스팟 IP 주소'
 최종 앱은 HC-020K 엔코더 D2/D7, 모터 D5/D3·D6/D9, 왼쪽 극성 `1`·오른쪽 `-1`, PWM `150`을 사용합니다. ToF는 최종 Export에서 비활성화되어 장애물 자동 정지를 제공하지 않습니다. 배선·극성·전원 설정은 해당 실물 환경 기준입니다. USB/ADB 연결과 상세 동작은 [수신 앱 안내](apps/qrover_encoder/README_KO.md)를 참고하세요.
 
 실행 중 생성되는 카메라 사진·보정 JSON·진단 로그는 PC에 남으며 Git에서 제외합니다. 기본 지도 입력·기준점·graph/semantic·차량 ONNX 모델은 배포에 포함합니다. 새 PC에서는 현재 카메라 세션으로 지도 생성과 보정을 다시 수행합니다.
+
+## 실행 중 자주 확인할 사항
+
+| 상황 | 확인할 내용 |
+| --- | --- |
+| App Lab 앱 선택 | 최종 Import 파일은 `apps/qrover_encoder/q_rover_encoder_receiver.zip`입니다. 다른 수신 앱의 속도 명령과 혼용하지 않습니다. |
+| 목적지가 예상과 다름 | 원하는 빈칸을 웹에서 직접 선택해 테스트를 시작하고, 터미널의 목적지 ID를 확인합니다. |
+| 마커 관측 대기 | 같은 테스트에서는 새 관측이 돌아오면 재개합니다. 웹캠 영상·마커 가림·촬영 후 200ms 만료를 확인합니다. |
+| MCU fault 또는 보드 응답 시간 초과 | 같은 시각의 App Lab Python 콘솔과 MCU 상태를 확인합니다. 종료 후 상태를 복구하고 다시 실행합니다. |
+| 웹 성공과 모터 종료가 다름 | 웹의 픽셀 도착 시험과 PC의 2cm 도착 판정은 별개입니다. PC 터미널의 모터 주행 완료를 확인합니다. |
+
+최종 웹 주행은 로버를 마커 중심 한 점으로 취급하며 차체 외곽·회전 궤적 충돌을 검사하지 않습니다. ToF도 최종 앱에서 비활성화되어 있습니다. 사용자 실물 정상 동작 보고와 자동 시험의 범위·남은 한계는 [로드맵](docs/ROADMAP.md)에 구분했습니다.
+
+## 개발자 검증
+
+아래 시험은 모의 카메라·localhost 통신 또는 호스트 C++를 사용합니다. 실제 보드 업로드나 모터 구동은 하지 않습니다. 마지막 코드 정리에서 Python 184개·웹 주행 58개·통신 15개와 호스트 펌웨어 검사 45개/42개가 통과했습니다. 저장 캡처를 사용하는 일부 시험은 새 clone에서 해당 로컬 기록이 없으면 skip하며, C++ 시험에는 컴파일러가 필요합니다.
+
+```powershell
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests -p 'test_*.py' -q
+.\.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s apps/qrover_encoder/simulation -p 'test_*.py' -q
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\simulation\check_interfaces.py
+.\.venv\Scripts\python.exe -B -X utf8 .\apps\qrover_encoder\simulation\check_firmware.py
+```
+
+## 상세 지도 생성·위치 진단·기존 도구
+
+기본 실주행은 위 실행 순서를 사용합니다. 아래에는 오프라인 지도 생성, 브라우저 카메라 모드, 위치 표시·UDP 전송, 기존 정적 경로 주행과 픽셀 도착 시험을 보존했습니다. 각 절차는 별도의 진단·호환 경로이며 최종 웹 주행에 모두 실행할 필요는 없습니다. 카메라를 사용하는 별도 도구를 기본 웹 서버와 동시에 실행하지 않습니다.
+
+<details>
+<summary>상세 사용법 펼치기 — 지도·보정·ArUco 진단 및 기존 주행 도구</summary>
 
 ## Python 웹캠으로 백그라운드 감시
 
@@ -364,3 +422,5 @@ ArUco 보완 검출이 반환하는 모서리도 원본 카메라 픽셀 기준�
 | ~~이전 카메라 구역과 점유 파일 재사용~~ | 새 구도의 카메라 영역을 다시 지정. 이전 기록은 `archives/`에 보관 |
 
 점유 인식 설정은 [카메라 점유 설정](docs/TEAM_GUIDE.md#카메라-점유-설정)을 참고하세요. 테스트 명령은 `& $python -m unittest discover -s tests -v`입니다. 남은 팀별 작업은 [로드맵](docs/ROADMAP.md), 이전 구현과 실행 로그는 [인수인계 기록](docs/PROJECT_HANDOFF.md)에 있습니다.
+
+</details>

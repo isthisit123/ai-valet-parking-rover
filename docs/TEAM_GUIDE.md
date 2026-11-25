@@ -1,5 +1,57 @@
 # Q-ROVER 팀 통합 가이드
 
+2026-11-25 최종 버전 기준입니다. 설치·실행은 [README](../README.md), 확인한 결과와 남은 한계는 [로드맵](ROADMAP.md)을 참고합니다. 아래의 JSON 예시는 필수 형식을 설명하는 발췌이며 전체 응답 스키마를 대체하지 않습니다. 실제 필드 검증은 생산·소비 코드와 테스트를 기준으로 합니다.
+
+## 최종 웹 주행의 연결 구조
+
+| 구간 | 생산자 → 소비자 | 형식과 역할 |
+| --- | --- | --- |
+| 영상·인식 | Python 웹 서버 → 웹/API | 같은 카메라 프레임으로 ArUco·차량·점유를 갱신합니다. 기본 서버 포트는 8001입니다. |
+| 웹 선택 | 웹 테스트 → `web_drive.py` | `/api/rover-pose`의 `arrival_test`와 `/api/parking-occupancy`에서 현재 목적지·상태를 읽습니다. |
+| 좌표·계획 | 같은 캡처의 보정 → PC 주행기 | 높이 보정한 마커 중심과 도로 그래프를 world cm로 변환합니다. 첫 점은 새 관측의 실제 위치, 마지막 점은 현재 `parking_space_id`의 중심입니다. |
+| 모터 명령 | PC → App Lab Python → MCU | TCP 8765의 줄 단위 JSON을 Bridge의 `encoder_step/poll/stop` 호출로 전달합니다. |
+
+최종 앱 파일은 `apps/qrover_encoder/q_rover_encoder_receiver.zip`입니다. MCU는 엔코더 방식이므로 PC에는 `--encoder-drive`를 지정합니다. 기본 웹 주행에 별도 UDP 위치 전송기는 필요하지 않습니다. `apps/q_rover_receiver/`의 속도 명령 방식은 별도 호환 구현입니다.
+
+| API | 용도 | 최종 주행기의 사용 |
+| --- | --- | --- |
+| `GET /api/rover-pose` | 원본 ArUco 관측과 `arrival_test` 상태 | 현재 촬영 시각·마커·테스트·목적지 확인 |
+| `GET /api/parking-occupancy` | 현재 지도·캡처의 점유와 TTL | 목적지의 최신 `free` 상태 검사 |
+| `POST /api/arrival-test/start`, `/api/arrival-test/stop` | 웹 테스트 시작·중단 | 웹 UI가 호출하며 주행기는 상태 변화를 읽음 |
+| `POST /api/camera/start`, `/api/camera/monitor`, `/api/camera/stop` | Python 카메라·감시 제어 | 웹 UI의 카메라·감시 모드 |
+| `POST /api/camera/map-capture` | Python 카메라 원본에서 지도 생성 | 웹 UI의 PNG 전송·맵 생성 |
+| `POST /api/map-capture` | 브라우저·파일 원본 PNG의 지도 생성 | 별도 입력 경로 |
+
+웹 주행기는 같은 PC의 localhost HTTP 서버만 허용합니다. 보드의 핫스팟 IP는 이 웹 API 주소가 아니라 TCP 모터 수신 앱의 주소입니다.
+
+## 최종 엔코더 명령과 응답
+
+각 요청은 증가하는 정수 `seq`와 `type`을 갖고 줄바꿈으로 끝납니다. `mode`는 1 전진·2 시계 회전·3 반시계 회전이며 `pulses`는 각 바퀴의 상승 에지 목표 수입니다. 수신기는 전진 최대 8·회전 최대 2펄스를 허용하고, 현재 웹 주행기는 전진 1~5·회전 1~2펄스를 요청합니다.
+
+```jsonl
+{"seq":1,"type":"stop"}
+{"seq":1,"state":0}
+{"seq":2,"type":"step","mode":1,"pulses":5}
+{"seq":2,"state":1}
+{"seq":3,"type":"poll"}
+{"seq":3,"state":0}
+```
+
+위 예시는 요청·응답이 번갈아 나오는 한 연결의 예입니다. `state=0`은 정지/완료, `1`은 구동 중, 음수는 저장된 MCU 고장입니다. Bridge 호출 실패 시 Python은 가능한 경우 같은 `seq`의 `error`를 보내고 연결을 끝냅니다. MCU 고장은 자동 해제하지 않습니다. 최종 Python의 시작 문구에는 `step / timed_step`이 있지만 최종 MCU는 `timed_step` RPC를 제공하지 않습니다.
+
+| 항목 | 최종 설정 |
+| --- | --- |
+| PC TCP 연결 / 응답 대기 | 2초 / 1.5초 |
+| App Lab 클라이언트 대기 / Bridge RPC 대기 | 5초 / 2초 |
+| MCU heartbeat / 엔코더 정체 / 작업 제한 | 2초 / 1.5초 / 6초 |
+| MCU 제동 후 새 작업 대기 | 200ms |
+| 위치 / 점유 유효 시간 | 촬영 후 200ms / 최대 5초 |
+| 도착 | 새 관측 한 장에서 마커 중심과 목표 중심 거리 ≤ 기본 2cm |
+
+PC 응답 제한이 Bridge 대기보다 짧아 내부 오류 응답 전에 PC가 종료될 수 있습니다. 오류 원인은 PC와 App Lab 로그를 같은 시각으로 대조합니다. 최종 Export의 제어·통신 설정을 문서 정리 과정에서 변경하지 않았습니다.
+
+마커가 일시적으로 안 보이면 제동하고 같은 테스트에서 새 관측을 기다립니다. 새 테스트·지도/보정 변경·웹 Stop·목적지 점유/만료·MCU 고장·통신 단절은 종료 사유입니다. 경로 이탈은 현재 위치에서 다시 계획하며 차체 외곽 검사와 최종 방향 정렬은 적용하지 않습니다. 최종 앱의 ToF는 비활성화되어 있습니다.
+
 ## 통합 기준 지도·점유·경로
 
 | 항목 | 기준 |
@@ -16,10 +68,11 @@
 
 웹 소스와 차량 모델은 저장소의 `web/parkinghaeven/`을 기본으로 사용합니다. `models/parking_cars.onnx`는 단일 car 클래스 모델이며 실제 파일을 Git에 포함합니다. COCO 80클래스 `yolov8n.onnx`로 대체하지 않습니다. 모델 해시·출력 `[1,5,8400]` 규약은 `web/parkinghaeven/models/manifest.json`에 있습니다. 모델이 없으면 HTTP 서버 시작 시 명확히 실패하며, 외부 웹 폴더만 모델이 없는 경우에는 포함된 모델을 제공합니다.
 
-| 담당 | 다음 작업 | 전달물 |
+| 담당 영역 | 유지·인계 책임 | 전달물 |
 | --- | --- | --- |
-| 맵 제작팀 | HTTP OCR 자동 생성은 연결됨. 실제 카메라 구도로 시설·주차칸과 점유 검증. 새 지도에서 기준점 4개 실측. | 기준 PNG·라벨·의미 지도, 카메라 ROI와 빈 기준 사진, 최신 점유 JSON, 검증된 cm 경로 |
-| 주행팀 | 바퀴를 띄우고 모터·ToF·정지 시험. ArUco 위치를 같은 월드 좌표계로 연결한 뒤 짧은 직선부터 시험. | 위치/방향 입력, 모터 보정값, 장애물·통신·추적 유실 시 정지 기록, 도착 오차 |
+| 지도·경로 | 지도 ID·시설 매핑·연결 그래프·캡처별 보정을 유지합니다. | 원본 PNG·라벨·graph/semantic·보정 보고서 |
+| 점유 인식 | 같은 카메라·영역의 최신 점유와 미관측 처리를 유지합니다. | `free/occupied/unknown`과 관측 시각·지도 식별자 |
+| 로버 제어 | 최종 앱·PC 명령 호환성과 실물 배선·극성·정지 동작을 인계합니다. | Import ZIP·동일 소스·실측 환경·정지 및 도착 기록 |
 
 ## 카메라 점유 설정
 
@@ -96,6 +149,14 @@ $model = ".\web\parkinghaeven\models\parking_cars.onnx"
 
 ## 점유 JSON
 
+최종 실시간 `GET /api/parking-occupancy`는 아래처럼 `states`로 칸별 상태를 제공합니다. 예시는 일부 필드만 발췌한 것이며 실제 소비에는 같은 `capture_id`, `map_id`, `map_image_sha256`, `id_assignment_revision`도 필요합니다. `fresh`와 `age_seconds`, `ttl_seconds`를 함께 검사합니다.
+
+```json
+{"fresh":true,"age_seconds":0.1,"ttl_seconds":5.0,"states":{"space_1":"free","space_2":"occupied","space_3":"unknown"}}
+```
+
+아래 `spaces`·`schema_version: 0.1-draft` 형식은 별도 파일 기반 점유 도구의 예시입니다. 실시간 API의 `states` 구조와 구분합니다.
+
 ```json
 {
   "schema_version": "0.1-draft",
@@ -134,18 +195,20 @@ $model = ".\web\parkinghaeven\models\parking_cars.onnx"
 
 - 지도에서 경로를 선택할 때는 픽셀 그래프를 사용합니다. 로버 경로 생성 시 웨이포인트와 간선·경로 길이를 cm로 변환하고, 최종 점을 선택한 주차칸 중앙으로 둡니다.
 - 주행 파일은 `coordinate_frame: world`, `unit: cm`, `origin: paper_top_left`, `calibration_verified: true`와 `waypoints: [[x, y], ...]`를 사용합니다. `world_estimate`는 확인용 미리보기입니다.
-- 로버 위치는 같은 노트북의 UDP `127.0.0.1:8766`에 약 0.10초마다 보냅니다. `captured_monotonic_s`는 그 노트북에서 프레임을 받은 시점의 `time.monotonic()`입니다. 0.20초를 넘긴 위치는 사용하지 않습니다.
+- 별도 위치 전송기 `pose_sender`를 실행하는 기존 경로에서는 같은 노트북의 UDP `127.0.0.1:8766`으로 약 0.10초마다 위치를 보냅니다. `captured_monotonic_s`와 0.20초 유효 시간을 검사합니다. 최종 웹 주행기는 HTTP 관측을 직접 사용합니다.
 - `src.rover_control.pose_sender`는 주행 전에 검증·저장한 바닥 변환식을 읽고, ArUco API가 보내는 로버 마커의 원본 픽셀 위치·방향을 월드로 바꿉니다. 웹캠 원본과 지도 PNG의 같은 비율 크기 차이를 반영합니다. 같은 구도에서 십자가 가려져도 변환식을 재사용합니다. 위치 메시지에는 `map_image_sha256`과 `id_assignment_revision`도 포함하며 주행기가 경로와 대조합니다. `--preview-only`로 위치를 확인할 수 있습니다.
 - 기존 `drive --route`는 시작 시 지정한 정적 cm 경로를 읽습니다. 웹 주행기 `apps/qrover_encoder/web_drive.py`는 `/api/rover-pose`의 `arrival_test.parking_space_id`와 `/api/parking-occupancy`를 읽습니다. 같은 캡처에서 높이 보정한 마커 중심 한 점을 출발점으로 삼고, 바닥 Homography로 변환한 도로 그래프를 따라 선택한 칸 중심까지 주행합니다. 같은 테스트에서 경로 버전이 증가하면 제동 후 경로를 교체합니다. 추적 유실 시 제동하고 새 관측으로 재개합니다. 새 테스트·지도·조건, 웹 Stop, 점유 만료, MCU·통신 오류에는 종료합니다. 기본 실행은 사전 검사이며 최종 App Lab 앱에는 사전 검사·실주행 모두 `--encoder-drive`를 사용하고, 실주행에 `--drive`를 추가합니다. 최종 수신 앱은 엔코더 ON·ToF OFF이며 전진 1~5펄스·회전 1~2펄스의 `step` 명령을 처리합니다. 각 동작 뒤 새 ArUco 관측으로 보정합니다. 2026-11-25 사용자가 실물 주행 정상 동작을 확인했습니다. 모터는 마커 중심이 목표 중심의 기본 2cm 반경에 들어온 첫 관측에서 정지합니다. [실행](../apps/qrover_encoder/README_KO.md)
 - 높이 보정에는 `--camera-position-cm X Y Z`로 전지 원점 기준 렌즈 중심의 실측 위치를 입력합니다. X·Y는 렌즈에서 수직으로 내린 점이며 카메라가 바라보는 화면 중심점과 다릅니다. Z는 전지 표면부터 렌즈까지 수직 높이로, 전지 밖 X·Y와 음수 좌표도 허용합니다. `--marker-height-cm` 기본 10.5cm보다 Z가 커야 합니다. 바닥 투영점 Q를 `C_xy + (1-h/C_z)*(Q_xy-C_xy)`로 높이 평면에 옮긴 뒤, `--center-offset-cm` 기본 `[0, 0]cm`를 적용해 구동 바퀴 축 중간점을 계산합니다. 카메라 이동 후 위치를 다시 측정하고 지도를 재보정합니다. 구도 변경의 자동 감지는 없습니다. [측정·실행](../README.md#보정된-cm-위치를-주행-프로그램에-보내기)
-- 현재 렌즈 실측값 `[53, 151.7, 111.5]cm`와 마커 높이 10.5cm는 캡처별 `world/camera_position.json`에 저장합니다. 명시적 `--camera-position-cm` 입력은 검증 후 현재 캡처에 설정을 저장하고, 생략하면 저장값을 사용합니다. 캡처 보고서·보정 파일의 SHA-256이 달라지면 재입력을 요구합니다. 새 구도에 실측값을 자동 이식하지 않습니다.
+- 렌즈의 실측 X·Y·Z와 마커 높이는 캡처별 `world/camera_position.json`에 저장합니다. 명시적 `--camera-position-cm` 입력은 검증 후 현재 캡처에 설정을 저장하고, 생략하면 저장값을 사용합니다. 캡처 보고서·보정 파일의 SHA-256이 달라지면 재입력을 요구합니다. 과거 기록의 실측 숫자를 새 구도에 자동 이식하지 않습니다.
 - 높이 보정된 UDP 위치는 기존 월드 cm 계약을 유지하고 `position_reference: height_corrected_marker_with_offset`, `height_correction_applied: true`, `marker_height_cm`, `camera_position_cm`을 추가합니다. 주행기의 기존 좌표·지도 식별자 소비는 유지합니다. 웹의 `/api/rover-pose`는 상단 마커의 원본 카메라 픽셀을 제공하고, 도착 시험은 저장된 카메라 실측값이 있을 때 높이 보정 결과를 지도 픽셀로 역투영합니다. CLI의 높이 미보정 모드는 `--floor-projection-only --preview-only` 진단으로 제한하며 UDP를 전송하지 않습니다. 마커는 전지와 평행해야 하며 기울기·전방 부착 오차와 렌즈 왜곡은 별도로 확인합니다. 로버 마커 유실·중복, 관측 만료, 통신 오류, 카메라 세션·해상도 또는 기준 지도 불일치, 전송기 종료에는 기존대로 `lost`를 보냅니다.
 
 ```json
 {"type":"pose","map_id":"parking_map_real","coordinate_frame":"world","unit":"cm","origin":"paper_top_left","x_cm":8.95,"y_cm":40.06,"heading_deg":0.0,"captured_monotonic_s":12345.6}
 ```
 
-추적을 잃으면 `{"type":"lost","map_id":"parking_map_real"}`을 보냅니다. UNO Q의 TCP 기본 포트는 `8765`입니다. 명령과 응답은 줄바꿈으로 구분하고, 로버는 명령 `seq`를 `applied_seq`로 확인합니다.
+### 기존 속도·UDP 주행의 별도 계약
+
+이 절은 `src.rover_control.drive`와 `apps/q_rover_receiver/`를 사용하는 기존 구현입니다. 최종 엔코더 앱의 `step/poll/stop` 형식과 혼용하지 않습니다. 위치 전송기가 추적을 잃으면 `{"type":"lost","map_id":"parking_map_real"}`을 보냅니다. 이 기존 수신기도 TCP 8765를 사용하지만 속도 명령의 `seq`는 응답 `applied_seq`로 확인합니다.
 
 ```jsonl
 {"type":"drive","seq":1,"linear_cm_s":6.0,"angular_deg_s":-20.0}

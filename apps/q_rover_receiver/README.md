@@ -1,5 +1,7 @@
 # Q-ROVER Receiver
 
+이 폴더는 기존 TCP 속도 명령·UDP 위치 방식의 수신 앱입니다. **최종 웹 실주행 앱은 [`apps/qrover_encoder/q_rover_encoder_receiver.zip`](../qrover_encoder/q_rover_encoder_receiver.zip)**이며, 최초 설치·실행은 [저장소 README](../../README.md)를 따릅니다. 아래 설정과 명령은 기존 속도 방식의 유지·진단용입니다.
+
 노트북의 경로 추종 제어기가 보낸 TCP 속도 명령을 UNO Q의 Linux에서 받고, Bridge로 STM32 MCU에 전달합니다.
 
 ## App Lab 설정
